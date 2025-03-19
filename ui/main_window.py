@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QPushButton, QLabel, QComboBox, QFileDialog, 
                             QTextEdit, QLineEdit, QMessageBox, QAction, 
                             QMenuBar, QMenu, QTabWidget, QSplitter, QProgressBar,
-                            QDateEdit)
+                            QDateEdit, QCheckBox)
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSettings
 from pydub import AudioSegment
 
@@ -30,15 +30,20 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Audio Recorder")
         self.setMinimumSize(1000, 600)
         
+        # Initialize output_dir to None
+        self.output_dir = None
+        
         # Create UI
         self.setup_ui()
+        self.waveform_widget.audio_player = self.audio_player
         
         # Connect signals
         self.connect_signals()
         
         # Load settings
         self.load_settings()
-    
+
+
     def setup_ui(self):
         # Create menu bar
         self.create_menu_bar()
@@ -69,7 +74,12 @@ class MainWindow(QMainWindow):
         self.style_combo.addItems(["Select Style", "HAPPY", "SAD", "NEUTRAL"])
         date_layout.addWidget(QLabel("Style:"))
         date_layout.addWidget(self.style_combo)
-        
+
+        # Add a progress bar for CSV recording progress
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.statusBar().addPermanentWidget(self.progress_bar, 2)
+
         self.speaker_combo = QComboBox()
         self.speaker_combo.addItems(["Select Speaker", "Male", "Female"])
         date_layout.addWidget(QLabel("Speaker:"))
@@ -86,6 +96,12 @@ class MainWindow(QMainWindow):
         device_layout.addWidget(QLabel("8kHz Device:"))
         self.device_8k_combo = QComboBox()
         device_layout.addWidget(self.device_8k_combo)
+
+        # Add a checkbox for enabling/disabling 8k recording
+        self.enable_8k_checkbox = QCheckBox("Enable 8k Recording")
+        self.enable_8k_checkbox.setChecked(False)  # Default is enabled
+        device_layout.addWidget(self.enable_8k_checkbox)
+
         
         self.update_device_list_btn = QPushButton("Refresh Devices")
         device_layout.addWidget(self.update_device_list_btn)
@@ -144,6 +160,8 @@ class MainWindow(QMainWindow):
         
         # Populate device combo boxes
         self.update_device_list()
+
+        self.recording_panel.enable_controls(False)
     
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -171,6 +189,10 @@ class MainWindow(QMainWindow):
         audio_settings_action = QAction("Audio Settings", self)
         audio_settings_action.triggered.connect(self.open_settings)
         settings_menu.addAction(audio_settings_action)
+
+        test_devices_action = QAction("Test Recording Devices", self)
+        test_devices_action.triggered.connect(self.test_recording_devices)
+        settings_menu.addAction(test_devices_action)
     
     def connect_signals(self):
         # Connect UI signals
@@ -205,6 +227,13 @@ class MainWindow(QMainWindow):
         # Connect text input signals
         self.text_id.returnPressed.connect(self.load_by_id)
 
+        self.enable_8k_checkbox.stateChanged.connect(self.update_ui_for_toggle)
+
+    def update_ui_for_toggle(self):
+        """Update UI elements based on the toggle state."""
+        is_enabled = self.enable_8k_checkbox.isChecked()
+        self.device_8k_combo.setEnabled(is_enabled)
+
     def update_device_list(self):
         """Update the device combo boxes with available audio devices."""
         devices = self.audio_recorder.get_available_devices()
@@ -212,13 +241,22 @@ class MainWindow(QMainWindow):
         self.device_48k_combo.clear()
         self.device_8k_combo.clear()
         
+        # Add default device option first
+        self.device_48k_combo.addItem("System Default Device", -1)
+        self.device_8k_combo.addItem("System Default Device", -1)
+        
         for device in devices:
-            device_text = f"{device['name']}"
+            # Create more informative device labels
+            device_text = f"{device['name']} ({device['channels']} ch)"
             if device['is_asio']:
-                device_text += " (ASIO)"
+                device_text += " [ASIO]"
             
             self.device_48k_combo.addItem(device_text, device['index'])
             self.device_8k_combo.addItem(device_text, device['index'])
+            
+        # Select default device
+        self.device_48k_combo.setCurrentIndex(0)
+        self.device_8k_combo.setCurrentIndex(0)
     
     def initialize_recording(self):
         """Set up the recording session with current settings."""
@@ -257,7 +295,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.show_error(f"Failed to create output directory: {str(e)}")
 
-    # Further methods for UI interaction, recording, etc. would be added here
     def load_csv(self):
         """Load a CSV file containing recording text data."""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -266,10 +303,22 @@ class MainWindow(QMainWindow):
         
         if file_path:
             try:
-                self.data_manager.load_csv(file_path)
-                QMessageBox.information(self, "Success", f"CSV loaded: {file_path}")
+                success = self.data_manager.load_csv(file_path)
+                if success:
+                    # Show instructions
+                    QMessageBox.information(self, "CSV Loaded Successfully", 
+                                        "To record sentences:\n\n"
+                                        "1. Select your recording devices\n"
+                                        "2. Click 'Initialize Recording'\n"
+                                        "3. Use the red record button (⏺) to record each sentence\n"
+                                        "4. Press the right arrow (→) to move to the next sentence\n\n"
+                                        "You can also use keyboard shortcuts:\n"
+                                        "R: Start/stop recording\n"
+                                        "Space: Play/pause\n"
+                                        "Arrow keys: Navigate between sentences")
             except Exception as e:
                 self.show_error(f"Error loading CSV: {str(e)}")
+
     
     def select_output_directory(self):
         """Select base output directory for recordings."""
@@ -291,9 +340,22 @@ class MainWindow(QMainWindow):
     
     def start_recording(self):
         """Start recording audio."""
+        # Check if recording has been initialized
+        if not hasattr(self, 'output_dir') or self.output_dir is None:
+            QMessageBox.warning(self, "Not Initialized", 
+                            "Please click 'Initialize Recording' first to set up the output directory.")
+            return
+            
         # Get device indices
-        device_48k = self.device_48k_combo.currentData()
-        device_8k = self.device_8k_combo.currentData()
+        if self.device_48k_combo.currentText() == "System Default Device":
+            device_48k = self.audio_recorder.get_system_default_device(mode="input")
+        else:
+            device_48k = self.device_48k_combo.currentData()
+        
+        if self.device_8k_combo.currentText() == "System Default Device":
+            device_8k = self.audio_recorder.get_system_default_device(mode="input")
+        else:
+            device_8k = self.device_8k_combo.currentData()
         
         # Get current ID and text
         text_id = self.text_id.text()
@@ -308,13 +370,32 @@ class MainWindow(QMainWindow):
         filename_8k = os.path.join(self.output_dir, '8khz', f"{text_id}.wav")
         
         # Start recording
-        self.audio_recorder.start_recording(device_48k, device_8k, filename_48k, filename_8k)
-        self.recording_panel.set_recording_state(True)
+        try:
+            self.audio_recorder.start_recording(device_48k, device_8k, filename_48k, filename_8k)
+            self.recording_panel.set_recording_state(True)
+        except Exception as e:
+            self.show_error(f"Recording error: {str(e)}")
 
     def stop_recording(self):
-        """Stop current recording."""
+        """Stop current recording and advance to next item."""
         self.audio_recorder.stop_recording()
         self.recording_panel.set_recording_state(False)
+        
+        # Mark current item as recorded in the data manager
+        current_id = self.text_id.text()
+        if current_id and hasattr(self, 'output_dir'):
+            audio_path_48k = os.path.join(self.output_dir, '48khz', f"{current_id}.wav")
+            audio_path_8k = os.path.join(self.output_dir, '8khz', f"{current_id}.wav")
+            
+            # Update data manager with recorded status
+            self.data_manager.register_recording(audio_path_48k, audio_path_8k, self.audio_recorder.last_recording_duration)
+            
+            # Move to next item automatically
+            QTimer.singleShot(1000, self.next_sentence)
+            
+        # Update progress display
+        stats = self.data_manager.get_total_stats()
+        self.progress_bar.setValue(int(stats['progress_percent']))
 
     def play_audio(self):
         """Play the current audio file."""
@@ -333,14 +414,18 @@ class MainWindow(QMainWindow):
 
     def pause_audio(self):
         """Pause/resume audio playback."""
-        if self.audio_player.is_playing():
-            if self.recording_panel.is_paused:
-                self.audio_player.resume()
-                self.recording_panel.set_paused_state(False)
-            else:
-                self.audio_player.pause()
-                self.recording_panel.set_paused_state(True)
-    
+        if self.audio_player.is_currently_playing():
+            # If playing and not paused, pause it
+            self.audio_player.pause()
+            self.recording_panel.set_paused_state(True)
+        elif self.audio_player.is_playing and self.audio_player.is_paused:
+            # If paused, resume
+            self.audio_player.resume()
+            self.recording_panel.set_paused_state(False)
+        else:
+            # Not playing at all, so start playback
+            self.play_audio()
+
     def next_sentence(self):
         """Move to the next item in the dataset."""
         self.data_manager.next_item()
@@ -438,7 +523,7 @@ class MainWindow(QMainWindow):
         # Update label
         self.duration_label.setText(f"Total Duration: {mins}:{secs:02d}")
     
-    def on_playback_started(self, duration):
+    def on_playback_started(self, filename, duration):
         """Handle playback started signal."""
         self.statusBar().showMessage(f"Playing... Duration: {duration:.1f} seconds")
         self.waveform_widget.set_duration(duration)
@@ -448,21 +533,98 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Playback stopped")
         self.recording_panel.set_playing_state(False)
         self.recording_panel.set_paused_state(False)
+        # Force UI update
+        self.recording_panel.update()
+
         
     def update_level_meter(self, level):
         """Update the level meter in the status bar."""
         self.level_meter.setValue(int(level * 100))
     
-    def on_data_loaded(self, count):
+    def on_data_loaded(self, dataframe):
         """Handle data loaded signal."""
+        count = len(dataframe) if dataframe is not None else 0
         self.statusBar().showMessage(f"Loaded {count} items")
-    
+        
+        # Populate combo boxes with unique values from the dataframe
+        if dataframe is not None:
+            # Update language combo
+            if 'language' in dataframe.columns:
+                self.language_combo.clear()
+                self.language_combo.addItem("Select Language")
+                for language in dataframe['language'].unique():
+                    if pd.notna(language) and language:  # Check if not NaN and not empty
+                        self.language_combo.addItem(str(language))
+            
+            # Update style combo
+            if 'style' in dataframe.columns:
+                self.style_combo.clear()
+                self.style_combo.addItem("Select Style")
+                for style in dataframe['style'].unique():
+                    if pd.notna(style) and style:  # Check if not NaN and not empty
+                        self.style_combo.addItem(str(style))
+            
+            # Update speaker combo
+            if 'speaker' in dataframe.columns:
+                self.speaker_combo.clear()
+                self.speaker_combo.addItem("Select Speaker")
+                for speaker in dataframe['speaker'].unique():
+                    if pd.notna(speaker) and speaker:  # Check if not NaN and not empty
+                        self.speaker_combo.addItem(str(speaker))
+        
+        # Update progress display
+        stats = self.data_manager.get_total_stats()
+        self.progress_bar.setValue(int(stats['progress_percent']))
+
     def update_ui_with_item(self, item):
         """Update UI with the current data item."""
-        if item:
-            self.text_id.setText(item.get('id', ''))
-            self.text_sentence.setPlainText(item.get('text', ''))
-    
+        if item is not None and not isinstance(item, bool):
+            # Convert to dictionary if it's a pandas Series
+            if hasattr(item, 'to_dict'):
+                item = item.to_dict()
+                
+            # Update ID and text fields
+            self.text_id.setText(str(item.get('id', '')))
+            self.text_sentence.setPlainText(str(item.get('text', '')))
+
+            # Update language, style, and speaker combo boxes if available in the data
+            if 'language' in item and item['language']:
+                language = str(item.get('language', ''))
+                index = self.language_combo.findText(language, Qt.MatchExactly)
+                if index < 0 and language:
+                    self.language_combo.addItem(language)
+                    index = self.language_combo.findText(language, Qt.MatchExactly)
+                if index >= 0:
+                    self.language_combo.setCurrentIndex(index)
+                    
+            if 'style' in item and item['style']:
+                style = str(item.get('style', ''))
+                index = self.style_combo.findText(style, Qt.MatchExactly)
+                if index < 0 and style:
+                    self.style_combo.addItem(style)
+                    index = self.style_combo.findText(style, Qt.MatchExactly)
+                if index >= 0:
+                    self.style_combo.setCurrentIndex(index)
+                    
+            if 'speaker' in item and item['speaker']:
+                speaker = str(item.get('speaker', ''))
+                index = self.speaker_combo.findText(speaker, Qt.MatchExactly)
+                if index < 0 and speaker:
+                    self.speaker_combo.addItem(speaker)
+                    index = self.speaker_combo.findText(speaker, Qt.MatchExactly)
+                if index >= 0:
+                    self.speaker_combo.setCurrentIndex(index)
+
+            # Update UI to clearly show recording status
+            recorded = item.get('recorded', False)
+            if recorded:
+                self.recording_panel.set_recorded_indicator(True)
+                self.statusBar().showMessage(f"Item {item.get('id', '')} already recorded")
+            else:
+                self.recording_panel.set_recorded_indicator(False)
+                self.statusBar().showMessage(f"Ready to record item {item.get('id', '')}")
+
+
     def update_audio_counter(self):
         """Update the counter for recorded audio files."""
         if hasattr(self, 'output_dir'):
@@ -492,3 +654,84 @@ class MainWindow(QMainWindow):
         
         # Accept the close event
         event.accept()
+
+    def keyPressEvent(self, event):
+        """Handle keyboard shortcuts for efficient recording workflow."""
+        if event.key() == Qt.Key_R:
+            # R key: Start/stop recording
+            if not self.recording_panel.is_recording:
+                self.start_recording()
+            else:
+                self.stop_recording()
+        elif event.key() == Qt.Key_Space:
+            # Space key: Play/pause audio
+            if self.recording_panel.is_playing:
+                self.pause_audio()
+            else:
+                self.play_audio()
+        elif event.key() == Qt.Key_Right:
+            # Right arrow: Next sentence
+            self.next_sentence()
+        elif event.key() == Qt.Key_Left:
+            # Left arrow: Previous sentence
+            self.prev_sentence()
+        else:
+            super().keyPressEvent(event)
+
+    def test_recording_devices(self):
+        """Test all available recording devices."""
+        # Create progress dialog
+        from PyQt5.QtWidgets import QProgressDialog, QApplication
+        
+        devices = self.audio_recorder.get_available_devices()
+        if not devices:
+            QMessageBox.warning(self, "No Devices", "No recording devices detected.")
+            return
+            
+        progress = QProgressDialog("Testing audio devices...", "Cancel", 0, len(devices), self)
+        progress.setWindowTitle("Device Test")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        QApplication.processEvents()
+        
+        # Test each device
+        working_devices = []
+        for i, device in enumerate(devices):
+            progress.setValue(i)
+            progress.setLabelText(f"Testing: {device['name']}")
+            if progress.wasCanceled():
+                break
+                
+            QApplication.processEvents()
+            success, message = self.audio_recorder.test_recording_device(device['index'])
+            
+            if success:
+                working_devices.append(device)
+            
+        progress.setValue(len(devices))
+        
+        # Update devices with working ones first
+        self.device_48k_combo.clear()
+        self.device_8k_combo.clear()
+        
+        # Add working devices first
+        for device in working_devices:
+            device_text = f"✓ {device['name']}"
+            if device['is_asio']:
+                device_text += " (ASIO)"
+            
+            self.device_48k_combo.addItem(device_text, device['index'])
+            self.device_8k_combo.addItem(device_text, device['index'])
+        
+        # Add other devices
+        for device in devices:
+            if device not in working_devices:
+                device_text = f"? {device['name']}"
+                if device['is_asio']:
+                    device_text += " (ASIO)"
+                
+                self.device_48k_combo.addItem(device_text, device['index'])
+                self.device_8k_combo.addItem(device_text, device['index'])
+                
+        QMessageBox.information(self, "Device Test Complete", 
+                            f"Found {len(working_devices)} working devices out of {len(devices)} detected devices.")

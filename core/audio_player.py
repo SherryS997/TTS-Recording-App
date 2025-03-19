@@ -13,7 +13,7 @@ class AudioPlayer(QObject):
     """
     
     # Define signals
-    playback_started = pyqtSignal(str)  # Signal emitted when playback starts (with filename)
+    playback_started = pyqtSignal(str, float)  # Signal emitted when playback starts (with filename)
     playback_stopped = pyqtSignal()     # Signal emitted when playback stops
     playback_paused = pyqtSignal()      # Signal emitted when playback is paused
     playback_resumed = pyqtSignal()     # Signal emitted when playback is resumed
@@ -105,9 +105,14 @@ class AudioPlayer(QObject):
             self.error_occurred.emit(f"Error loading audio file: {str(e)}")
             return False
     
-    @pyqtSlot()
-    def play(self):
-        """Start or resume playback of the loaded audio file."""
+    @pyqtSlot(str)
+    def play(self, file_path=None):
+        """Start or resume playback of an audio file."""
+        if file_path and file_path != self.current_file:
+            # Load a new file
+            if not self.load_audio_file(file_path):
+                return False
+        
         if self.audio_data is None:
             self.error_occurred.emit("No audio file loaded")
             return False
@@ -132,8 +137,13 @@ class AudioPlayer(QObject):
         self.position_timer.start()
         
         # Emit signal
-        self.playback_started.emit(os.path.basename(self.current_file))
+        self.playback_started.emit(os.path.basename(self.current_file), self.duration)
+
         return True
+    
+    def is_currently_playing(self):
+        """Check if audio is currently playing."""
+        return self.is_playing and not self.is_paused
     
     @pyqtSlot()
     def stop(self):
@@ -289,8 +299,25 @@ class AudioPlayer(QObject):
     def toggle_sample_rate(self):
         """Toggle between 48kHz and 8kHz for A/B comparison."""
         if self.audio_data_8k is not None and self.is_playing:
-            # Implement switching between sample rates during playback
-            pass
+            # Stop current playback
+            self.stop()
+            
+            # Toggle between high and low sample rate
+            if self.sample_rate == 48000 and self.audio_data_8k is not None:
+                # Switch to 8kHz
+                temp = self.audio_data
+                self.audio_data = self.audio_data_8k
+                self.audio_data_8k = temp
+                self.sample_rate = 8000
+            else:
+                # Switch back to 48kHz
+                temp = self.audio_data
+                self.audio_data = self.audio_data_8k
+                self.audio_data_8k = temp
+                self.sample_rate = 48000
+                
+            # Restart playback
+            self.play()
     
     def cleanup(self):
         """Clean up resources before destruction."""

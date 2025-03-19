@@ -59,6 +59,18 @@ class DataManager(QObject):
         """Save current settings to QSettings."""
         settings = QSettings()
         settings.setValue('data_manager/base_dir', self.base_dir)
+
+    def set_current_item_by_id(self, id_value):
+        """
+        Set the current item by ID value.
+        
+        Args:
+            id_value (str): ID to search for
+            
+        Returns:
+            bool: True if found, False otherwise
+        """
+        return self.jump_to_id(id_value)
     
     def set_base_directory(self, directory):
         """
@@ -131,26 +143,24 @@ class DataManager(QObject):
             return None
     
     def load_csv(self, file_path=None):
-        """
-        Load data from a CSV file.
-        
-        Args:
-            file_path (str, optional): Path to CSV file. If None, opens a file dialog.
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
         try:
-            if file_path is None:
-                return False
-                
-            if not os.path.exists(file_path):
-                self.error_occurred.emit(f"File not found: {file_path}")
-                return False
-            
             # Load CSV into dataframe
             df = pd.read_csv(file_path)
             
+            # Handle case-insensitive column mapping for required and metadata columns
+            column_mapping = {
+                'ID': 'id',
+                'Sentence': 'text',
+                'style': 'style',
+                'speaker': 'speaker',
+                'language': 'language'
+            }
+            
+            # Rename columns if they exist in different case
+            for original, renamed in column_mapping.items():
+                if original in df.columns and renamed not in df.columns:
+                    df.rename(columns={original: renamed}, inplace=True)
+                    
             # Check for required columns
             for col in self.required_columns:
                 if col not in df.columns:

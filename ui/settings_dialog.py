@@ -133,3 +133,20 @@ class SettingsDialog(QDialog):
         """Save settings when OK button is clicked."""
         self.save_settings()
         super().accept()
+
+    def get_settings(self):
+        """Return the current settings as a QSettings object."""
+        settings = QSettings()
+        
+        # Audio settings
+        settings.setValue("audio/bit_depth", self.bit_depth_combo.currentText())
+        settings.setValue("audio/buffer_size", self.buffer_size_combo.currentText())
+        settings.setValue("audio/trim_threshold", self.trim_threshold_spin.value())
+        settings.setValue("audio/auto_trim", self.auto_trim_check.isChecked())
+        
+        # Storage settings
+        settings.setValue("storage/directory", self.storage_dir_edit.text())
+        settings.setValue("storage/file_format", self.file_format_combo.currentText())
+        
+        return settings
+

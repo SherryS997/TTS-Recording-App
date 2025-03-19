@@ -4,6 +4,7 @@ from PyQt5.QtWidgets import QWidget, QVBoxLayout
 from PyQt5.QtCore import Qt, pyqtSlot
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+import soundfile as sf
 
 class WaveformWidget(QWidget):
     """Widget that displays audio waveforms and allows for seeking."""
@@ -86,5 +87,35 @@ class WaveformWidget(QWidget):
             # Calculate position in seconds
             clicked_position = event.xdata
             
-            # Emit signal to seek to this position in the audio playback
-            self.parent().audio_player.seek(clicked_position)
+            # Check if we have an audio_player reference
+            if hasattr(self, 'audio_player') and self.audio_player:
+                # Seek to this position in the audio playback
+                self.audio_player.seek(clicked_position)
+
+    def load_audio_file(self, file_path):
+        """Load audio file and update the waveform display."""
+        try:
+            import soundfile as sf
+            
+            # Load the audio file
+            audio_data, sample_rate = sf.read(file_path)
+            
+            # Convert to mono if stereo
+            if len(audio_data.shape) > 1 and audio_data.shape[1] > 1:
+                audio_data = audio_data[:, 0]
+                
+            self.set_audio_data(audio_data, sample_rate)
+            return True
+        except Exception as e:
+            print(f"Error loading audio file: {str(e)}")
+            return False
+
+    def set_duration(self, duration):
+        """Set the duration of the audio in seconds."""
+        self.duration = float(duration)
+        
+        # If you need to update the display based on duration
+        # For example, update the x-axis limits
+        if hasattr(self, 'axes') and self.audio_data is not None:
+            self.axes.set_xlim(0, self.duration)
+            self.canvas.draw_idle()

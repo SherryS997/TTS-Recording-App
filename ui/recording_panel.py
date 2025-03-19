@@ -152,6 +152,13 @@ class RecordingPanel(QWidget):
         else:
             self.play_button.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
             self.play_button.setToolTip("Play (P)")
+        
+        # Force update by temporarily clearing focus and setting it back
+        has_focus = self.play_button.hasFocus()
+        self.play_button.clearFocus()
+        self.play_button.update()
+        if has_focus:
+            self.play_button.setFocus()
     
     @pyqtSlot()
     def on_record_clicked(self):
@@ -166,11 +173,12 @@ class RecordingPanel(QWidget):
     @pyqtSlot()
     def on_play_clicked(self):
         """Handle play/pause button click."""
-        if self.is_playing and not self.is_paused:
+        # Simply emit the signal, let the main window determine the action
+        if self.is_playing:
             self.pause_button_clicked.emit()
         else:
             self.play_button_clicked.emit()
-    
+
     @pyqtSlot()
     def on_prev_clicked(self):
         """Handle previous button click."""
@@ -250,6 +258,18 @@ class RecordingPanel(QWidget):
         self.prev_button.setEnabled(enabled)
         self.next_button.setEnabled(enabled)
         self.trim_button.setEnabled(enabled)
+
+    @pyqtSlot(bool)
+    def set_recorded_indicator(self, is_recorded):
+        """Update UI to indicate whether the current item has been recorded."""
+        if is_recorded:
+            # Visual indication that item is recorded
+            self.record_button.setStyleSheet("color: green; font-size: 20px;")
+            self.record_button.setToolTip("Already Recorded (R)")
+        else:
+            # Reset to normal recording state
+            self.record_button.setStyleSheet("color: red; font-size: 20px;")
+            self.record_button.setToolTip("Start Recording (R)")
     
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts."""
