@@ -5,7 +5,7 @@ import pandas as pd
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QPushButton, QLabel, QComboBox, QFileDialog, 
                             QTextEdit, QLineEdit, QMessageBox, QAction, 
-                            QMenuBar, QMenu, QTabWidget, QSplitter, QProgressBar,
+                            QMenuBar, QMenu, QTabWidget, QSplitter, QSlider, QProgressBar,
                             QDateEdit, QCheckBox)
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSettings
 from pydub import AudioSegment
@@ -100,6 +100,7 @@ class MainWindow(QMainWindow):
         # Add a checkbox for enabling/disabling 8k recording
         self.enable_8k_checkbox = QCheckBox("Enable 8k Recording")
         self.enable_8k_checkbox.setChecked(False)  # Default is enabled
+        self.audio_recorder.enable_8k = False
         device_layout.addWidget(self.enable_8k_checkbox)
 
         
@@ -144,12 +145,18 @@ class MainWindow(QMainWindow):
         
         # Create waveform widget
         self.waveform_widget = WaveformWidget()
+        
+        # We'll connect to the recording panel's slider instead of creating a new one
         splitter.addWidget(self.waveform_widget)
         
         main_layout.addWidget(splitter, 1)
         
         # Create recording panel
         self.recording_panel = RecordingPanel()
+
+        # Pass the audio_player to recording_panel so that it can control playback
+        self.recording_panel.set_audio_player(self.audio_player)
+
         main_layout.addWidget(self.recording_panel)
         
         # Create status bar for db meter
@@ -208,8 +215,14 @@ class MainWindow(QMainWindow):
         # Connect player signals
         self.audio_player.playback_started.connect(self.on_playback_started)
         self.audio_player.playback_stopped.connect(self.on_playback_stopped)
-        self.audio_player.position_changed.connect(self.waveform_widget.update_position)
+        self.audio_player.position_changed.connect(self.on_player_position_changed)
         self.audio_player.error_occurred.connect(self.show_error)
+        
+        # Set up the waveform widget to use the recording panel's time slider
+        self.waveform_widget.set_time_slider(self.recording_panel.time_slider)
+        
+        # Connect the slider's value change to seek audio
+        self.recording_panel.time_slider.sliderMoved.connect(self.on_slider_moved)
         
         # Connect data manager signals
         self.data_manager.data_loaded.connect(self.on_data_loaded)
@@ -228,15 +241,38 @@ class MainWindow(QMainWindow):
         self.text_id.returnPressed.connect(self.load_by_id)
 
         self.enable_8k_checkbox.stateChanged.connect(self.update_ui_for_toggle)
+        self.audio_recorder.enable_8k = self.enable_8k_checkbox.isChecked()
+
+    def on_slider_moved(self, position):
+        """Handle when user moves the slider to seek audio"""
+        if self.audio_player.get_duration() > 0:
+            # Convert slider position (0-1000) to seconds
+            seek_position = (position / 1000.0) * self.audio_player.get_duration()
+            
+            # Update the audio player's current position
+            self.audio_player.seek(seek_position)
+            
+            # If audio was playing, force a restart from the new position
+            was_playing = self.audio_player.is_playing and not self.audio_player.is_paused
+            if was_playing:
+                # Store current position
+                current_file = self.audio_player.current_file
+                
+                # Stop and restart playback from new position
+                self.audio_player.stop()
+                self.audio_player.current_position = seek_position
+                self.audio_player.play(current_file)
 
     def update_ui_for_toggle(self):
         """Update UI elements based on the toggle state."""
         is_enabled = self.enable_8k_checkbox.isChecked()
         self.device_8k_combo.setEnabled(is_enabled)
+        self.audio_recorder.enable_8k = is_enabled
+        print(self.enable_8k_checkbox.isChecked())
 
     def update_device_list(self):
         """Update the device combo boxes with available audio devices."""
-        devices = self.audio_recorder.get_available_devices()
+        devices = self.audio_recorder.get_available_devices(include_asio=False)
         
         self.device_48k_combo.clear()
         self.device_8k_combo.clear()
@@ -390,8 +426,9 @@ class MainWindow(QMainWindow):
             # Update data manager with recorded status
             self.data_manager.register_recording(audio_path_48k, audio_path_8k, self.audio_recorder.last_recording_duration)
             
-            # Move to next item automatically
-            QTimer.singleShot(1000, self.next_sentence)
+            # # Move to next item automatically
+            # QTimer.singleShot(1000, self.next_sentence)
+            self.waveform_widget.load_audio_file(audio_path_48k)
             
         # Update progress display
         stats = self.data_manager.get_total_stats()
@@ -432,7 +469,7 @@ class MainWindow(QMainWindow):
     
     def prev_sentence(self):
         """Move to the previous item in the dataset."""
-        self.data_manager.prev_item()
+        self.data_manager.previous_item()
     
     # Implement trim_audio method properly
     def trim_audio(self):
@@ -522,11 +559,49 @@ class MainWindow(QMainWindow):
 
         # Update label
         self.duration_label.setText(f"Total Duration: {mins}:{secs:02d}")
+
+    def on_player_position_changed(self, position, duration=None):
+        """Handle player position changed signal to update UI components."""
+        # Get duration from audio player if not provided in the signal
+        if duration is None:
+            duration = self.audio_player.get_duration()
+            if duration <= 0:
+                return  # Skip updates if we don't have a valid duration
+        
+        # Update the waveform position
+        self.waveform_widget.update_position(position)
+        
+        # Update the recording panel's time display
+        minutes = int(position // 60)
+        seconds = int(position % 60)
+        current_time = f"{minutes}:{seconds:02d}"
+        
+        total_minutes = int(duration // 60)
+        total_seconds = int(duration % 60)
+        total_time = f"{total_minutes}:{total_seconds:02d}"
+        
+        self.recording_panel.update_time_display(current_time, total_time)
+        
+        # Update the slider position (as percentage of total duration)
+        if duration > 0:
+            position_percent = int((position / duration) * 1000)
+            self.recording_panel.update_slider_position(position_percent)
     
     def on_playback_started(self, filename, duration):
         """Handle playback started signal."""
         self.statusBar().showMessage(f"Playing... Duration: {duration:.1f} seconds")
+        
+        # Set up the waveform widget with the duration
         self.waveform_widget.set_duration(duration)
+        
+        # Format and set the duration label in recording panel
+        total_minutes = int(duration // 60)
+        total_seconds = int(duration % 60)
+        total_time = f"{total_minutes}:{total_seconds:02d}"
+        
+        # Update recording panel
+        self.recording_panel.update_time_display("0:00", total_time)
+        self.recording_panel.set_playing_state(True)
     
     def on_playback_stopped(self):
         """Handle playback stopped signal."""

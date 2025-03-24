@@ -24,12 +24,17 @@ class RecordingPanel(QWidget):
         super().__init__(parent)
         
         # Initial state
+        self.audio_player = None
         self.is_recording = False
         self.is_playing = False
         self.is_paused = False
         
         # Set up the UI
         self.setup_ui()
+
+    def set_audio_player(self, audio_player):
+        """Set the AudioPlayer instance so that the panel can control playback."""
+        self.audio_player = audio_player
     
     def setup_ui(self):
         """Create and arrange the UI elements."""
@@ -48,6 +53,12 @@ class RecordingPanel(QWidget):
         
         # Set initial button states
         self.update_button_states()
+
+        # Assuming self.time_slider is your QSlider for the playback time
+        self.time_slider.setRange(0, 1000)  # Ensure a fixed resolution
+        self.time_slider.setValue(0)
+        self.time_slider.setTracking(False)  # Only update when released
+        self.time_slider.sliderReleased.connect(self.on_slider_released)
     
     def create_transport_controls(self, layout):
         """Create record, stop, play buttons."""
@@ -208,10 +219,17 @@ class RecordingPanel(QWidget):
     
     @pyqtSlot()
     def on_slider_released(self):
-        """Handle time slider release (seek completed)."""
-        # This will be connected to an external handler
-        pass
-    
+        """Handle seek bar release event."""
+        if not self.audio_player:
+            print("Error: audio_player is not set in RecordingPanel.")
+            return
+        slider_value = self.time_slider.value()
+        slider_max = self.time_slider.maximum()
+        total_duration = self.audio_player.get_duration()  # Duration in seconds
+        # Compute the new position in seconds based on slider value
+        new_position = (slider_value / slider_max) * total_duration
+        self.audio_player.seek(new_position)
+
     @pyqtSlot(bool)
     def set_recording_state(self, is_recording):
         """Update UI to reflect recording state."""

@@ -1,6 +1,6 @@
 # ui/waveform_widget.py
 import numpy as np
-from PyQt5.QtWidgets import QWidget, QVBoxLayout
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel
 from PyQt5.QtCore import Qt, pyqtSlot
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -12,9 +12,14 @@ class WaveformWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setup_ui()
+        self.audio_player = None  # if needed for audio operations
+        self.time_slider = None   # Initialize with None
         self.audio_data = None
         self.sample_rate = 48000
         self.current_position = 0
+
+    def set_time_slider(self, slider):
+        self.time_slider = slider
         
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -32,6 +37,9 @@ class WaveformWidget(QWidget):
         
         # Line to show current position
         self.position_line = None
+
+        self.time_label = QLabel("0:00")
+        layout.addWidget(self.time_label)
         
         # Connect mouse events for seeking
         self.canvas.mpl_connect('button_press_event', self.on_click)
@@ -51,7 +59,7 @@ class WaveformWidget(QWidget):
         
         # Calculate time axis
         time = np.arange(0, len(self.audio_data)) / self.sample_rate
-        
+    
         # Plot waveform
         self.axes.plot(time, self.audio_data, linewidth=0.5)
         
@@ -60,9 +68,12 @@ class WaveformWidget(QWidget):
         self.axes.set_ylim(-max_amplitude, max_amplitude)
         self.axes.set_xlim(0, len(self.audio_data) / self.sample_rate)
         
-        # Add position line
+        # Safely remove existing position line if exists
         if self.position_line:
-            self.position_line.remove()
+            try:
+                self.position_line.remove()
+            except Exception:
+                pass
         self.position_line = self.axes.axvline(x=self.current_position, color='r', linestyle='-')
         
         self.axes.set_xlabel('Time (s)')
@@ -73,13 +84,18 @@ class WaveformWidget(QWidget):
         self.canvas.draw()
         
     @pyqtSlot(float)
-    def update_position(self, position):
-        """Update the current position indicator."""
-        self.current_position = position
-        
-        if self.position_line and self.audio_data is not None:
-            self.position_line.set_xdata(position)
-            self.canvas.draw_idle()  # More efficient than full redraw
+    def update_position(self, current_time):
+        total_duration = self.audio_player.get_duration() if self.audio_player else 0
+        if total_duration > 0 and self.time_slider:
+            # Update slider value based on current_time
+            slider_value = int((current_time / total_duration) * self.time_slider.maximum())
+            self.time_slider.blockSignals(True)  # Avoid recursive updates
+            self.time_slider.setValue(slider_value)
+            self.time_slider.blockSignals(False)
+            # Also update any time label, for example:
+            minutes = int(current_time // 60)
+            seconds = int(current_time % 60)
+            self.time_label.setText(f"{minutes}:{seconds:02d}")
     
     def on_click(self, event):
         """Handle mouse click for seeking."""
@@ -95,8 +111,6 @@ class WaveformWidget(QWidget):
     def load_audio_file(self, file_path):
         """Load audio file and update the waveform display."""
         try:
-            import soundfile as sf
-            
             # Load the audio file
             audio_data, sample_rate = sf.read(file_path)
             
@@ -107,6 +121,7 @@ class WaveformWidget(QWidget):
             self.set_audio_data(audio_data, sample_rate)
             return True
         except Exception as e:
+            print("here")
             print(f"Error loading audio file: {str(e)}")
             return False
 

@@ -3,8 +3,8 @@ import wave
 import time
 import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, QTimer
-from PyQt5.QtMultimedia import QAudioOutput, QAudioFormat, QAudioDeviceInfo, QAudio
 import sounddevice as sd
+from core.playback_worker import PlaybackWorker
 
 class AudioPlayer(QObject):
     """
@@ -17,7 +17,7 @@ class AudioPlayer(QObject):
     playback_stopped = pyqtSignal()     # Signal emitted when playback stops
     playback_paused = pyqtSignal()      # Signal emitted when playback is paused
     playback_resumed = pyqtSignal()     # Signal emitted when playback is resumed
-    position_changed = pyqtSignal(float)  # Signal emitted when playback position changes (in seconds)
+    position_changed = pyqtSignal(float, float)  # Signal emitted when playback position changes (in seconds)
     duration_changed = pyqtSignal(float)  # Signal emitted when a new file with different duration is loaded
     error_occurred = pyqtSignal(str)    # Signal emitted when an error occurs
     
@@ -109,38 +109,86 @@ class AudioPlayer(QObject):
     def play(self, file_path=None):
         """Start or resume playback of an audio file."""
         if file_path and file_path != self.current_file:
-            # Load a new file
             if not self.load_audio_file(file_path):
                 return False
-        
+
         if self.audio_data is None:
             self.error_occurred.emit("No audio file loaded")
             return False
-            
+
         if self.is_paused:
             return self.resume()
-            
+
         if self.is_playing:
             return True
-        
-        # Start playback in a separate thread
+
         self.is_playing = True
         self.is_paused = False
-        
-        # Create and start playback thread
+        self.seek_position = None
+
+        # Create a new QThread for playback
         self.playback_thread = QThread()
-        self.moveToThread(self.playback_thread)
-        self.playback_thread.started.connect(self._playback_worker)
+        
+        # Create PlaybackWorker with required parameters.
+        # We pass the audio data, sample rate, channels, current position and callbacks.
+        self.playback_worker = PlaybackWorker(
+            audio_data=self.audio_data,
+            sample_rate=self.sample_rate,
+            channels=self.channels,
+            start_position=self.current_position,
+            get_seek_position_callback=lambda: self._consume_seek(),
+            update_position_callback=self._update_current_position,
+            stop_flag_getter=lambda: not self.is_playing,
+            is_paused_getter=lambda: self.is_paused 
+        )
+
+        
+        # Move worker to the playback thread
+        self.playback_worker.moveToThread(self.playback_thread)
+        
+        # Connect signals: When thread starts, run the worker's run method
+        self.playback_thread.started.connect(self.playback_worker.run)
+        
+        # Connect finished signal to clean up
+        self.playback_worker.finished.connect(self._playback_finished)
+        self.playback_worker.error_occurred.connect(self.error_occurred)
+        
+        # Start the thread
         self.playback_thread.start()
         
-        # Start position update timer
+        # Start the QTimer (which is still in the main thread) to update UI position
         self.position_timer.start()
         
-        # Emit signal
+        # Emit signal that playback started
         self.playback_started.emit(os.path.basename(self.current_file), self.duration)
-
         return True
-    
+
+    def _consume_seek(self):
+        """Helper to get and clear the seek position if one is requested."""
+        pos = self.seek_position
+        self.seek_position = None
+        return pos
+
+    def _update_current_position(self, pos):
+        """Update the current position based on worker callback."""
+        self.current_position = pos
+        self.position_changed.emit(pos, self.duration)
+
+    def _playback_finished(self):
+        """Cleanup after playback finishes."""
+        self.is_playing = False
+        self.current_position = 0.0
+        self.position_timer.stop()
+        self.playback_stopped.emit()
+        
+        # Safely quit and delete the playback thread
+        if self.playback_thread:
+            self.playback_thread.quit()
+            if not self.playback_thread.wait(1000):
+                print("Warning: Playback thread did not terminate in time.")
+            self.playback_thread = None
+            self.playback_worker = None
+        
     def is_currently_playing(self):
         """Check if audio is currently playing."""
         return self.is_playing and not self.is_paused
@@ -150,23 +198,19 @@ class AudioPlayer(QObject):
         """Stop playback."""
         if not self.is_playing:
             return
-            
+
         self.is_playing = False
         self.is_paused = False
-        
-        # Stop position timer
         self.position_timer.stop()
-        
-        # Wait for playback thread to finish
+
+        # Wait for the worker thread to finish cleanup
         if self.playback_thread and self.playback_thread.isRunning():
             self.playback_thread.quit()
-            self.playback_thread.wait()
-        
-        # Reset position
+            if not self.playback_thread.wait(1000):
+                print("Warning: Playback thread did not terminate in time.")
+
         self.current_position = 0.0
-        self.position_changed.emit(self.current_position)
-        
-        # Emit signal
+        self.position_changed.emit(self.current_position, self.duration)
         self.playback_stopped.emit()
     
     @pyqtSlot()
@@ -195,7 +239,6 @@ class AudioPlayer(QObject):
     def seek(self, position_seconds):
         """
         Seek to a specific position in the audio file.
-        
         Args:
             position_seconds (float): Position to seek to in seconds
         """
@@ -205,13 +248,19 @@ class AudioPlayer(QObject):
         # Clamp position between 0 and duration
         position_seconds = max(0, min(position_seconds, self.duration))
         
+        # Always update current position, regardless of playback state
+        self.current_position = position_seconds
+        
         if self.is_playing and not self.is_paused:
-            # If playing, set seek position and let playback loop handle it
+            # If playing, set the seek position so that the PlaybackWorker
+            # will pick it up in the next loop iteration.
             self.seek_position = position_seconds
+            
+            # Force an immediate position update to UI
+            self.position_changed.emit(position_seconds, self.duration)
         else:
             # If not playing, just update position
-            self.current_position = position_seconds
-            self.position_changed.emit(position_seconds)
+            self.position_changed.emit(position_seconds, self.duration)
     
     def get_position(self):
         """Get current playback position in seconds."""
@@ -262,11 +311,19 @@ class AudioPlayer(QObject):
                         chunk = self.audio_data[current_sample:end_sample, :]
                     
                     # Write to output stream
-                    stream.write(chunk)
+                    try:
+                        stream.write(chunk)
+                    except Exception as stream_write_e: # Catch stream write errors
+                        self.error_occurred.emit(f"Stream write error: {stream_write_e}")
+                        self.is_playing = False # Ensure loop exit
+                        break # Exit the loop on stream write error
                     
                     # Update position
                     current_sample = end_sample
                     self.current_position = current_sample / self.sample_rate
+
+                    if not self.is_playing: # Double check inside the loop
+                        break
                     
                 # Playback finished
                 if current_sample >= len(self.audio_data) and self.is_playing:
@@ -283,7 +340,7 @@ class AudioPlayer(QObject):
     def _update_position(self):
         """Update position timer callback."""
         if self.is_playing and not self.is_paused:
-            self.position_changed.emit(self.current_position)
+            self.position_changed.emit(self.current_position, self.duration)
     
     def get_audio_data(self):
         """

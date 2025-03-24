@@ -5,8 +5,17 @@ import wave
 import numpy as np
 import sounddevice as sd
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread
+from PyQt5.QtWidgets import QApplication
 from pydub import AudioSegment
 import pyaudio
+
+class RecorderThread(QThread):
+    def __init__(self, recorder):
+        super().__init__()
+        self.recorder = recorder
+        
+    def run(self):
+        self.recorder._record_audio()
 
 class AudioRecorder(QObject):
     """Handles audio recording with support for multiple sample rates and ASIO."""
@@ -53,7 +62,8 @@ class AudioRecorder(QObject):
         self.rate_48k = 48000
         self.rate_8k = 8000
         self.chunk_size = 1024
-        self.last_recording_duration = 0.0  # Initialize this attribute
+        self.last_recording_duration = 0.0
+        self.enable_8k = False
     
     def get_available_devices(self, include_asio=True):
         """Returns a list of available audio devices with fallbacks."""
@@ -121,14 +131,13 @@ class AudioRecorder(QObject):
     def start_recording(self, device_48k_idx, device_8k_idx, filename_48k=None, filename_8k=None):
         if self.is_recording:
             return
-
+        
         self.device_48k = device_48k_idx
         self.frames_48k = []
         self.filename_48k = filename_48k
 
         # Check if the UI toggle for 8k recording is enabled.
-        # Here we assume the parent of this recorder is the main window.
-        if hasattr(self.parent(), 'enable_8k_checkbox') and self.parent().enable_8k_checkbox.isChecked():
+        if self.enable_8k:
             self.device_8k = device_8k_idx
             self.frames_8k = []
             self.filename_8k = filename_8k
@@ -136,11 +145,10 @@ class AudioRecorder(QObject):
             self.device_8k = None  # Skip 8k stream if toggle is off
             self.filename_8k = None
 
-        # Start recording in a new thread
+        # Start recording in a new thread using RecorderThread
         self.is_recording = True
-        self.recording_thread = QThread()
-        self.moveToThread(self.recording_thread)
-        self.recording_thread.started.connect(self._record_audio)
+        self.recording_thread = RecorderThread(self)
+        self.recording_thread.started.connect(lambda: None)  # optional: if you need additional setup
         self.recording_thread.start()
         self.recording_started.emit()
     
@@ -152,14 +160,18 @@ class AudioRecorder(QObject):
         self.is_recording = False
         if self.recording_thread and self.recording_thread.isRunning():
             self.recording_thread.quit()
-            self.recording_thread.wait()
+            if not self.recording_thread.wait(1000):  # Wait up to 1 second
+                print("Warning: Recording thread did not terminate in time.")
 
         duration = 0
-        if hasattr(self, 'filename_48k') and self.filename_48k:
-            duration = self._save_wav(self.filename_48k, self.frames_48k, self.rate_48k)
-            self.last_recording_duration = duration  # Update duration for later use
-        if hasattr(self, 'filename_8k') and self.filename_8k:
-            self._save_wav(self.filename_8k, self.frames_8k, self.rate_8k)
+        if hasattr(self, 'filename_48k') and self.filename_48k and self.frames_48k:
+            if len(self.frames_48k) > 0:
+                duration = self._save_wav(self.filename_48k, self.frames_48k, self.rate_48k)
+                self.last_recording_duration = duration
+        
+        if hasattr(self, 'filename_8k') and self.filename_8k and self.frames_8k:
+            if len(self.frames_8k) > 0:
+                self._save_wav(self.filename_8k, self.frames_8k, self.rate_8k)
 
         self.recording_stopped.emit(duration)
 
@@ -189,10 +201,14 @@ class AudioRecorder(QObject):
                 with stream_48k, stream_8k:
                     while self.is_recording:
                         time.sleep(0.1)
+                        if not self.is_recording: # Check again inside the loop
+                            break
             else:
                 with stream_48k:
                     while self.is_recording:
                         time.sleep(0.1)
+                        if not self.is_recording: # Check again inside the loop
+                            break
                         
         except Exception as e:
             self.is_recording = False
@@ -221,39 +237,17 @@ class AudioRecorder(QObject):
         # Store the audio data
         self.frames_8k.append(indata.copy())
     
-    def save_recording(self, base_path, filename):
-        """Save the recorded audio to files."""
-        if not self.frames_48k or not self.frames_8k:
-            self.error_occurred.emit("No audio data to save")
-            return False
-        
-        try:
-            # Create directories if they don't exist
-            os.makedirs(os.path.join(base_path, '48khz'), exist_ok=True)
-            os.makedirs(os.path.join(base_path, '8khz'), exist_ok=True)
-            
-            # Save 48kHz recording
-            path_48k = os.path.join(base_path, '48khz', f"{filename}.wav")
-            self._save_wav(path_48k, self.frames_48k, self.rate_48k)
-            
-            # Save 8kHz recording
-            path_8k = os.path.join(base_path, '8khz', f"{filename}.wav")
-            self._save_wav(path_8k, self.frames_8k, self.rate_8k)
-            
-            return True
-            
-        except Exception as e:
-            self.error_occurred.emit(f"Error saving audio: {str(e)}")
-            return False
-    
     def _save_wav(self, filepath, frames, samplerate):
         """Save audio frames to a WAV file."""
         # Convert list of numpy arrays to a single numpy array
         audio_data = np.concatenate(frames, axis=0)
+
+        # if self.format != 'int16':
+        audio_data = (audio_data * 32767).astype(np.int16)
         
         # Apply trimming to remove silence
         trimmed_audio = self._trim_silence(audio_data, samplerate)
-        
+
         # Save as WAV
         with wave.open(filepath, 'wb') as wf:
             wf.setnchannels(self.channels)
