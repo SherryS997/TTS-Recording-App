@@ -138,9 +138,13 @@ class MainWindow(QMainWindow):
         text_layout.addLayout(id_layout)
         
         self.text_sentence = QTextEdit()
-        self.text_sentence.setMinimumHeight(100)
+        self.text_sentence.setMinimumHeight(5)
         text_layout.addWidget(self.text_sentence)
-        
+        font = self.text_sentence.font()
+        font.setPointSize(16)
+        self.text_sentence.setFont(font)
+        text_layout.addWidget(self.text_sentence)
+                
         splitter.addWidget(text_widget)
         
         # Create waveform widget
