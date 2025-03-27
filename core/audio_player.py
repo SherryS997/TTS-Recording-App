@@ -1,5 +1,5 @@
 import os
-import wave
+import soundfile as sf
 import time
 import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, QTimer
@@ -47,13 +47,13 @@ class AudioPlayer(QObject):
         
     def load_audio_file(self, file_path, secondary_file_path=None):
         """
-        Load an audio file for playback.
+        Load an audio file for playback using soundfile.
         Optionally load a secondary file (e.g., 8kHz version for comparison)
-        
+
         Args:
             file_path (str): Path to the primary audio file (typically 48kHz)
             secondary_file_path (str, optional): Path to secondary file (8kHz)
-            
+
         Returns:
             bool: True if successful, False if an error occurred
         """
@@ -61,49 +61,50 @@ class AudioPlayer(QObject):
             if not os.path.exists(file_path):
                 self.error_occurred.emit(f"File not found: {file_path}")
                 return False
-                
-            # Load the audio file using wave
-            with wave.open(file_path, 'rb') as wf:
-                self.sample_rate = wf.getframerate()
-                self.channels = wf.getnchannels()
-                sample_width = wf.getsampwidth()
-                
-                # Read all frames and convert to numpy array
-                raw_data = wf.readframes(wf.getnframes())
-                
-                # Convert to numpy array based on sample width
-                if sample_width == 2:  # 16-bit audio
-                    data = np.frombuffer(raw_data, dtype=np.int16)
-                elif sample_width == 4:  # 32-bit audio
-                    data = np.frombuffer(raw_data, dtype=np.int32)
-                else:
-                    data = np.frombuffer(raw_data, dtype=np.uint8)
-                    
-                # Reshape if stereo
-                if self.channels == 2:
-                    data = data.reshape(-1, 2)
-            
-            # Store audio data
+
+            # Load the primary audio file using soundfile
+            # Request int16 directly as PlaybackWorker expects it
+            data, samplerate = sf.read(file_path, dtype='int16', always_2d=False)
+
+            # Ensure mono - soundfile reads mono as 1D, stereo as 2D
+            if data.ndim > 1:
+                # Simple approach: take the first channel if stereo
+                print(f"Warning: Loaded stereo file '{os.path.basename(file_path)}', using only first channel.")
+                data = data[:, 0]
+
+            self.sample_rate = samplerate
+            self.channels = 1 # Assuming mono playback based on potential conversion above
             self.audio_data = data
             self.current_file = file_path
             self.duration = len(data) / self.sample_rate
             self.current_position = 0.0
-            
+
             # Load secondary file if provided
+            self.audio_data_8k = None # Reset
             if secondary_file_path and os.path.exists(secondary_file_path):
-                with wave.open(secondary_file_path, 'rb') as wf:
-                    secondary_rate = wf.getframerate()
-                    secondary_raw_data = wf.readframes(wf.getnframes())
-                    secondary_data = np.frombuffer(secondary_raw_data, dtype=np.int16)
-                    self.audio_data_8k = secondary_data
-            
+                try:
+                    secondary_data, secondary_rate = sf.read(secondary_file_path, dtype='int16', always_2d=False)
+                    if secondary_data.ndim > 1:
+                         secondary_data = secondary_data[:, 0] # Use first channel if stereo
+
+                    # Basic check: ensure rate is somewhat low (e.g., < 12000)
+                    if secondary_rate < 12000:
+                        self.audio_data_8k = secondary_data
+                    else:
+                        print(f"Warning: Secondary file '{os.path.basename(secondary_file_path)}' has sample rate {secondary_rate}, expected ~8kHz. Ignoring.")
+
+                except Exception as e_sec:
+                     self.error_occurred.emit(f"Error loading secondary audio file '{secondary_file_path}': {str(e_sec)}")
+
             # Emit signal with new duration
             self.duration_changed.emit(self.duration)
+            print(f"Loaded: {os.path.basename(file_path)}, SR: {self.sample_rate}, Duration: {self.duration:.2f}s")
             return True
-            
+
         except Exception as e:
-            self.error_occurred.emit(f"Error loading audio file: {str(e)}")
+            self.error_occurred.emit(f"Error loading audio file '{file_path}': {str(e)}")
             return False
+
     
     @pyqtSlot(str)
     def play(self, file_path=None):
@@ -354,28 +355,50 @@ class AudioPlayer(QObject):
         return self.audio_data, self.sample_rate
     
     def toggle_sample_rate(self):
-        """Toggle between 48kHz and 8kHz for A/B comparison."""
+        """Toggle between primary and secondary (assumed 8kHz) for A/B comparison."""
+        # Check if secondary data exists and we are currently playing
         if self.audio_data_8k is not None and self.is_playing:
+            current_pos = self.current_position # Store current position
+
             # Stop current playback
-            self.stop()
-            
-            # Toggle between high and low sample rate
-            if self.sample_rate == 48000 and self.audio_data_8k is not None:
-                # Switch to 8kHz
-                temp = self.audio_data
+            self.stop() # This resets position, so we stored it above
+
+            # Determine the rate of the current primary audio_data
+            # We assume the initial load sets self.sample_rate correctly
+            # We need a way to know the rate of the *other* file (audio_data_8k)
+            # For simplicity, let's assume primary is 48k and secondary is 8k
+            assumed_primary_rate = 48000
+            assumed_secondary_rate = 8000
+
+            # Toggle between high and low sample rate data
+            if self.sample_rate == assumed_primary_rate:
+                # Switch to 8kHz data
+                temp_data = self.audio_data
                 self.audio_data = self.audio_data_8k
-                self.audio_data_8k = temp
-                self.sample_rate = 8000
+                self.audio_data_8k = temp_data # Keep the 48k data in the secondary slot
+                self.sample_rate = assumed_secondary_rate
+                print("Switched playback to 8kHz")
+            elif self.sample_rate == assumed_secondary_rate:
+                 # Switch back to 48kHz data
+                 temp_data = self.audio_data
+                 self.audio_data = self.audio_data_8k
+                 self.audio_data_8k = temp_data # Keep the 8k data in the secondary slot
+                 self.sample_rate = assumed_primary_rate
+                 print("Switched playback to 48kHz")
             else:
-                # Switch back to 48kHz
-                temp = self.audio_data
-                self.audio_data = self.audio_data_8k
-                self.audio_data_8k = temp
-                self.sample_rate = 48000
-                
-            # Restart playback
+                print(f"Warning: Cannot toggle sample rate from current rate {self.sample_rate}")
+                return # Don't restart playback if rates are unexpected
+
+            # Update duration based on the new audio data
+            self.duration = len(self.audio_data) / self.sample_rate
+            self.duration_changed.emit(self.duration)
+
+            # Seek to the stored position in the new audio
+            self.seek(current_pos) # Update position before starting play
+
+            # Restart playback with the new data/rate
             self.play()
-    
+
     def cleanup(self):
         """Clean up resources before destruction."""
         self.stop()

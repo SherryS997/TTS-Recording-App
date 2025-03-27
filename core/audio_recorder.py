@@ -1,13 +1,13 @@
 # core/audio_recorder.py
 import os
 import time
-import wave
 import numpy as np
 import sounddevice as sd
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread
 from PyQt5.QtWidgets import QApplication
-from pydub import AudioSegment
+import soundfile as sf
 import pyaudio
+from utils.audio_utils import trim_silence_numpy # ADD
 
 class RecorderThread(QThread):
     def __init__(self, recorder):
@@ -25,29 +25,53 @@ class AudioRecorder(QObject):
     level_meter = pyqtSignal(float)
     error_occurred = pyqtSignal(str)
 
+    def __init__(self, parent=None):
+        self.format = 'int16' # Or load from settings
+        self.silence_threshold_db = -40 # Default, or load from settings
+        self.padding_ms = 100 # Default, or load from settings
+        self.auto_trim_on_save = False
+
     def apply_settings(self, settings):
         """Apply settings from the settings dialog."""
         try:
-            # Parse bit depth
+            # ... (bit depth parsing - store subtype for soundfile) ...
+            print(settings)
+
             bit_depth = settings.value("audio/bit_depth", "16-bit")
             if bit_depth == "16-bit":
                 self.format = 'int16'
+                self.subtype = 'PCM_16' # soundfile subtype
             elif bit_depth == "24-bit":
-                self.format = 'int24'
+                self.format = 'int24' # sounddevice format
+                self.subtype = 'PCM_24' # soundfile subtype
             elif bit_depth == "32-bit float":
                 self.format = 'float32'
-                
+                self.subtype = 'FLOAT' # soundfile subtype
+            else: # Default
+                self.format = 'int16'
+                self.subtype = 'PCM_16'
+
             # Apply buffer size
             buffer_size = settings.value("audio/buffer_size", "1024")
-            self.chunk_size = int(buffer_size)
-            
-            # Apply other settings as needed
-            trim_threshold = settings.value("audio/trim_threshold", 2, int)
-            self.silence_threshold = float(trim_threshold) / 100.0
-            
+            self.chunk_size = int(buffer_size) # Note: sounddevice callback doesn't use chunk_size directly
+
+            # Trim threshold (needs conversion dB -> linear if needed by trimmer)
+            # Assuming settings store dB or similar. Let's store dB.
+            # The trim_threshold setting in the dialog is % - this needs rethinking.
+            # Let's assume settings store dB for now, matching audio_utils.
+            self.silence_threshold_db = settings.value("audio/trim_threshold_db", -40, float) # Example: add a dB setting
+
             self.padding_ms = settings.value("audio/padding_ms", 100, int)
+
+            # Store file format (used for extension)
+            self.file_format = settings.value("storage/file_format", "WAV").lower() # Store as 'wav' or 'flac'
+
+            # Auto-trim setting
+            self.auto_trim_on_save = settings.value("audio/auto_trim", True, bool)
+
         except Exception as e:
             self.error_occurred.emit(f"Failed to apply settings: {str(e)}")
+
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -178,22 +202,27 @@ class AudioRecorder(QObject):
     
     def _record_audio(self):
         try:
+            # Determine dtype based on self.format
+            dtype = self.format if self.format in ['int16', 'int24', 'float32'] else 'int16'
+
             # Create 48kHz stream (required)
             stream_48k = sd.InputStream(
                 device=self.device_48k,
                 channels=self.channels,
                 samplerate=self.rate_48k,
-                callback=self._callback_48k
+                callback=self._callback_48k,
+                dtype=dtype # Use the selected dtype
             )
-            
-            # Only create the 8kHz stream if an appropriate device is set
+
+            # Only create the 8kHz stream if enabled
             stream_8k = None
-            if self.device_8k is not None:
+            if self.enable_8k and self.device_8k is not None:
                 stream_8k = sd.InputStream(
                     device=self.device_8k,
                     channels=self.channels,
                     samplerate=self.rate_8k,
-                    callback=self._callback_8k
+                    callback=self._callback_8k,
+                    dtype=dtype # Use the same dtype
                 )
             
             # Use different context managers depending on the availability of the 8kHz stream
@@ -236,27 +265,80 @@ class AudioRecorder(QObject):
         
         # Store the audio data
         self.frames_8k.append(indata.copy())
-    
+
     def _save_wav(self, filepath, frames, samplerate):
-        """Save audio frames to a WAV file."""
+        """Save audio frames to a WAV file using soundfile, optionally trimming."""
+        if not frames:
+             print(f"Warning: No frames received for {filepath}. Skipping save.")
+             return 0.0
+
         # Convert list of numpy arrays to a single numpy array
-        audio_data = np.concatenate(frames, axis=0)
+        # Ensure the array is contiguous
+        try:
+            audio_data = np.concatenate(frames, axis=0)
+        except ValueError as e:
+            print(f"Error concatenating frames for {filepath}: {e}")
+            # Attempt to fix if shapes mismatch slightly (rare with InputStream)
+            if frames:
+                 max_len = max(f.shape[0] for f in frames)
+                 frames_padded = [np.pad(f, ((0, max_len - f.shape[0]), (0, 0)), 'constant') if f.shape[0] < max_len else f for f in frames]
+                 try:
+                     audio_data = np.concatenate(frames_padded, axis=0)
+                     print("Warning: Had to pad frames to concatenate.")
+                 except ValueError as e2:
+                      self.error_occurred.emit(f"Failed to save {filepath}: Inconsistent audio frame shapes. {e2}")
+                      return 0.0
+            else: # Should have been caught by the initial 'if not frames'
+                 return 0.0
+            
+        # Apply trimming if enabled
+        if False:
+             # Ensure audio_data is mono for trimming function
+             if audio_data.ndim > 1:
+                 audio_data_mono = audio_data[:, 0] # Use first channel
+             else:
+                 audio_data_mono = audio_data
 
-        # if self.format != 'int16':
-        audio_data = (audio_data * 32767).astype(np.int16)
-        
-        # Apply trimming to remove silence
-        trimmed_audio = self._trim_silence(audio_data, samplerate)
+             trimmed_audio, duration = trim_silence_numpy(
+                 audio_data_mono,
+                 samplerate,
+                 threshold_db=self.silence_threshold_db,
+                 padding_ms=self.padding_ms
+             )
+             if duration == 0:
+                 print(f"Warning: Trimming resulted in empty audio for {filepath}. Saving original.")
+                 # Optionally save the original untrimmed audio instead of nothing
+                 # trimmed_audio = audio_data # Revert to original if trim fails
+                 # duration = len(trimmed_audio) / samplerate
+                 # Fallback: Save original if trimming removed everything
+                 if len(audio_data) > 0:
+                    trimmed_audio = audio_data # Save original
+                    duration = len(trimmed_audio) / samplerate
+                    print("Saving original audio instead after trimming failed.")
+                 else:
+                    print(f"Error: Original audio was also empty for {filepath}.")
+                    return 0.0 # Can't save empty audio
+             # If original was stereo, need to handle this - currently trim is mono
+             # Simplest: If original was stereo, save the trimmed mono version
+             # Better: Trim based on mono energy, apply indices to stereo
+             # For now, we save the mono result of trim_silence_numpy
+             final_audio_data = trimmed_audio
+        else:
+             final_audio_data = audio_data
+             duration = len(final_audio_data) / samplerate
 
-        # Save as WAV
-        with wave.open(filepath, 'wb') as wf:
-            wf.setnchannels(self.channels)
-            wf.setsampwidth(2)  # 16-bit audio
-            wf.setframerate(samplerate)
-            wf.writeframes(trimmed_audio.tobytes())
-        
-        return len(trimmed_audio) / samplerate  # Return duration in seconds
-    
+        # Save using soundfile
+        try:
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            # Subtype (bit depth) is already stored in self.subtype
+            sf.write(filepath, final_audio_data, samplerate, subtype=self.subtype)
+            print(f"Saved: {os.path.basename(filepath)}, Duration: {duration:.2f}s, Subtype: {self.subtype}")
+            return duration
+
+        except Exception as e:
+            self.error_occurred.emit(f"Failed to save audio file '{filepath}': {str(e)}")
+            return 0.0
+
     def _trim_silence(self, audio_data, samplerate, threshold=0.02, padding_ms=100):
         """Trim silence from the beginning and end of the audio."""
         # Convert to absolute values

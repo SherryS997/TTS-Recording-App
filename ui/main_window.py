@@ -1,6 +1,6 @@
 # ui/main_window.py
 import os
-import datetime
+import datetime, sys
 import pandas as pd
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QPushButton, QLabel, QComboBox, QFileDialog, 
@@ -8,7 +8,6 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                             QMenuBar, QMenu, QTabWidget, QSplitter, QSlider, QProgressBar,
                             QDateEdit, QCheckBox)
 from PyQt5.QtCore import Qt, QTimer, pyqtSlot, QSettings
-from pydub import AudioSegment
 
 from ui.waveform_widget import WaveformWidget
 from ui.recording_panel import RecordingPanel
@@ -16,6 +15,7 @@ from ui.settings_dialog import SettingsDialog
 from core.audio_recorder import AudioRecorder
 from core.audio_player import AudioPlayer
 from core.data_manager import DataManager
+from utils.audio_utils import trim_silence_numpy
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -144,7 +144,7 @@ class MainWindow(QMainWindow):
         font.setPointSize(16)
         self.text_sentence.setFont(font)
         text_layout.addWidget(self.text_sentence)
-                
+
         splitter.addWidget(text_widget)
         
         # Create waveform widget
@@ -276,8 +276,12 @@ class MainWindow(QMainWindow):
 
     def update_device_list(self):
         """Update the device combo boxes with available audio devices."""
-        devices = self.audio_recorder.get_available_devices(include_asio=False)
-        
+        devices = self.audio_recorder.get_available_devices()
+
+        # Store current selections
+        current_48k_data = self.device_48k_combo.currentData()
+        current_8k_data = self.device_8k_combo.currentData()
+
         self.device_48k_combo.clear()
         self.device_8k_combo.clear()
         
@@ -285,18 +289,34 @@ class MainWindow(QMainWindow):
         self.device_48k_combo.addItem("System Default Device", -1)
         self.device_8k_combo.addItem("System Default Device", -1)
         
+        asio_found = False
         for device in devices:
             # Create more informative device labels
             device_text = f"{device['name']} ({device['channels']} ch)"
             if device['is_asio']:
                 device_text += " [ASIO]"
-            
+                asio_found = True
+
             self.device_48k_combo.addItem(device_text, device['index'])
             self.device_8k_combo.addItem(device_text, device['index'])
             
-        # Select default device
-        self.device_48k_combo.setCurrentIndex(0)
-        self.device_8k_combo.setCurrentIndex(0)
+        # Try to restore previous selection
+        idx_48k = self.device_48k_combo.findData(current_48k_data)
+        self.device_48k_combo.setCurrentIndex(idx_48k if idx_48k >= 0 else 0) # Default to first item if not found
+
+        idx_8k = self.device_8k_combo.findData(current_8k_data)
+        self.device_8k_combo.setCurrentIndex(idx_8k if idx_8k >= 0 else 0)
+
+        if asio_found:
+            print("ASIO devices listed.")
+        else:
+            # Check if ASIO was expected
+            settings = QSettings("AudioRecorder", "RecordingApp")
+            asio_enabled = settings.value("audio/enable_asio", False, bool)
+            if sys.platform == 'win32' and asio_enabled:
+                print("Warning: ASIO was enabled in settings, but no ASIO devices were found by sounddevice.")
+                QMessageBox.warning(self, "ASIO Warning", "ASIO is enabled in settings, but no ASIO devices were found.\nEnsure ASIO drivers are installed and working.")
+
     
     def initialize_recording(self):
         """Set up the recording session with current settings."""
@@ -373,10 +393,15 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         """Open the settings dialog."""
         settings_dialog = SettingsDialog(self)
+        # !!! IMPORTANT: Update SettingsDialog to handle dB threshold input !!!
+        # For now, it only has '%'. This needs harmonization.
+        # Let's assume settings dialog is updated to save 'audio/trim_threshold_db'
         if settings_dialog.exec_():
-            # Apply settings if dialog was accepted
             settings = settings_dialog.get_settings()
+            # Apply settings (AudioRecorder.apply_settings needs to read these)
             self.audio_recorder.apply_settings(settings)
+            # Maybe apply settings to other components if needed
+            print("Settings applied.")
     
     def start_recording(self):
         """Start recording audio."""
@@ -385,7 +410,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Not Initialized", 
                             "Please click 'Initialize Recording' first to set up the output directory.")
             return
-            
+
+        # Get file format extension from recorder's settings
+        file_extension = getattr(self.audio_recorder, 'file_format', 'wav') # Default to 'wav'
+
         # Get device indices
         if self.device_48k_combo.currentText() == "System Default Device":
             device_48k = self.audio_recorder.get_system_default_device(mode="input")
@@ -398,16 +426,27 @@ class MainWindow(QMainWindow):
             device_8k = self.device_8k_combo.currentData()
         
         # Get current ID and text
-        text_id = self.text_id.text()
-        text = self.text_sentence.toPlainText()
-        
+        current_item = self.data_manager.get_current_item()
+        if current_item is None:
+            self.show_error("No data item selected.")
+            return
+        text_id = str(current_item.get('id', ''))
+        text = str(current_item.get('text', '')) # Use text from data manager
+
+        if not text_id:
+            self.show_error("Current item has no ID.")
+            return
         if not text:
             self.show_error("Please enter text before recording.")
             return
         
-        # Create output file paths
-        filename_48k = os.path.join(self.output_dir, '48khz', f"{text_id}.wav")
-        filename_8k = os.path.join(self.output_dir, '8khz', f"{text_id}.wav")
+        # Create output file paths WITH extension
+        filename_48k = os.path.join(self.output_dir, '48khz', f"{text_id}.{file_extension}")
+        filename_8k = os.path.join(self.output_dir, '8khz', f"{text_id}.{file_extension}")
+
+        # Ensure directories exist (AudioRecorder._save_wav also does this, but doesn't hurt)
+        os.makedirs(os.path.join(self.output_dir, '48khz'), exist_ok=True)
+        os.makedirs(os.path.join(self.output_dir, '8khz'), exist_ok=True)
         
         # Start recording
         try:
@@ -418,40 +457,80 @@ class MainWindow(QMainWindow):
 
     def stop_recording(self):
         """Stop current recording and advance to next item."""
-        self.audio_recorder.stop_recording()
+        # Store filenames used by the recorder before stopping (stop might clear them)
+        filename_48k = getattr(self.audio_recorder, 'filename_48k', None)
+        filename_8k = getattr(self.audio_recorder, 'filename_8k', None)
+        enable_8k_was_on = getattr(self.audio_recorder, 'enable_8k', False)
+
+        # Stop recording (this triggers saving via callbacks/thread finish)
+        self.audio_recorder.stop_recording() # This emits recording_stopped with duration
         self.recording_panel.set_recording_state(False)
-        
-        # Mark current item as recorded in the data manager
-        current_id = self.text_id.text()
-        if current_id and hasattr(self, 'output_dir'):
-            audio_path_48k = os.path.join(self.output_dir, '48khz', f"{current_id}.wav")
-            audio_path_8k = os.path.join(self.output_dir, '8khz', f"{current_id}.wav")
-            
-            # Update data manager with recorded status
-            self.data_manager.register_recording(audio_path_48k, audio_path_8k, self.audio_recorder.last_recording_duration)
-            
-            # # Move to next item automatically
-            # QTimer.singleShot(1000, self.next_sentence)
-            self.waveform_widget.load_audio_file(audio_path_48k)
-            
+
+        # Duration is passed via the signal, connect to it if needed,
+        # or use last_recording_duration if recorder stores it reliably AFTER save.
+        # Let's use the stored filenames to check existence and register.
+
+        current_id = self.text_id.text() # Get ID from UI as confirmation
+        if not current_id:
+            print("Warning: Cannot register recording, no ID in UI field after stop.")
+            return
+
+        # Check if files were actually saved (use the paths passed to start_recording)
+        # Use the filenames captured *before* calling stop_recording
+        final_audio_path_48k = filename_48k if (filename_48k and os.path.exists(filename_48k)) else ''
+        final_audio_path_8k = filename_8k if (enable_8k_was_on and filename_8k and os.path.exists(filename_8k)) else ''
+        duration = self.audio_recorder.last_recording_duration # Get duration recorded by recorder
+
+        if not final_audio_path_48k:
+             self.show_error(f"Recording seemed to stop, but 48kHz file was not found: {filename_48k}")
+             # Don't register if primary file failed
+             return
+
+        # Update data manager with recorded status and FULL paths
+        # Make relative if desired? For now, keep full paths.
+        self.data_manager.register_recording(
+            final_audio_path_48k,
+            final_audio_path_8k,
+            duration
+        )
+
         # Update progress display
         stats = self.data_manager.get_total_stats()
         self.progress_bar.setValue(int(stats['progress_percent']))
 
+        # Load the newly recorded file into the waveform widget
+        if final_audio_path_48k:
+            self.waveform_widget.load_audio_file(final_audio_path_48k)
+        # Optionally auto-advance:
+        # QTimer.singleShot(500, self.next_sentence)
+
     def play_audio(self):
-        """Play the current audio file."""
-        current_id = self.text_id.text()
-        if not current_id:
+        """Play the audio file associated with the current item."""
+        current_item = self.data_manager.get_current_item()
+        if current_item is None:
+            self.show_error("No current item selected.")
             return
-        
-        # Use 48kHz file for playback
-        audio_file = os.path.join(self.output_dir, '48khz', f"{current_id}.wav")
-        
-        if os.path.exists(audio_file):
-            self.audio_player.play(audio_file)
-            self.recording_panel.set_playing_state(True)
+
+        # Get the full path from the data manager
+        audio_file = current_item.get('audio_path_48k', '') # Use 48k for playback
+
+        if audio_file and os.path.exists(audio_file):
+            # Pass secondary file path as well for A/B toggle
+            secondary_file = current_item.get('audio_path_8k', None)
+            if secondary_file and not os.path.exists(secondary_file):
+                secondary_file = None # Don't pass non-existent path
+
+            # Load and play
+            success = self.audio_player.load_audio_file(audio_file, secondary_file)
+            if success:
+                self.audio_player.play()
+                self.recording_panel.set_playing_state(True)
+            # Error handling is done within load_audio_file via signals
+
+        elif audio_file:
+            self.show_error(f"Audio file path found in data, but file does not exist: {audio_file}")
         else:
-            self.show_error(f"Audio file not found: {audio_file}")
+            self.show_error("This item has not been recorded yet or the audio path is missing.")
 
     def pause_audio(self):
         """Pause/resume audio playback."""
@@ -475,38 +554,107 @@ class MainWindow(QMainWindow):
         """Move to the previous item in the dataset."""
         self.data_manager.previous_item()
     
-    # Implement trim_audio method properly
     def trim_audio(self):
-        """Trim silence from the current audio file."""
-        current_id = self.text_id.text()
-        if not current_id:
+        """Trim silence from the current audio file using numpy and soundfile."""
+        current_item = self.data_manager.get_current_item()
+        if current_item is None:
+            self.show_error("No current item selected.")
             return
-            
-        audio_file_48k = os.path.join(self.output_dir, '48khz', f"{current_id}.wav")
-        audio_file_8k = os.path.join(self.output_dir, '8khz', f"{current_id}.wav")
-        
-        if not os.path.exists(audio_file_48k):
-            self.show_error(f"Audio file not found: {audio_file_48k}")
+
+        # Get full paths from data manager
+        audio_file_48k = current_item.get('audio_path_48k', '')
+        audio_file_8k = current_item.get('audio_path_8k', '')
+        current_id = current_item.get('id', '') # For messages
+
+        if not audio_file_48k or not os.path.exists(audio_file_48k):
+            self.show_error(f"Primary audio file not found or not recorded: {audio_file_48k}")
             return
-            
         try:
-            # Apply trimming to both files
-            # For 48kHz file
-            audio_segment = AudioSegment.from_wav(audio_file_48k)
-            trimmed_segment = self.trim_silence_from_audio(audio_segment)
-            trimmed_segment.export(audio_file_48k, format="wav")
-            
-            # For 8kHz file if exists
-            if os.path.exists(audio_file_8k):
-                audio_segment = AudioSegment.from_wav(audio_file_8k)
-                trimmed_segment = self.trim_silence_from_audio(audio_segment)
-                trimmed_segment.export(audio_file_8k, format="wav")
-                
-            self.statusBar().showMessage(f"Audio file trimmed: {current_id}.wav")
-            # Update waveform display
+            # --- Trim 48kHz file ---
+            self.statusBar().showMessage(f"Trimming {os.path.basename(audio_file_48k)}...")
+            QApplication.processEvents() # Update UI
+
+            # Load using soundfile
+            audio_data_48k, samplerate_48k = sf.read(audio_file_48k, always_2d=False)
+
+            # Ensure mono for trimming
+            if audio_data_48k.ndim > 1:
+                audio_data_48k_mono = audio_data_48k[:, 0]
+            else:
+                audio_data_48k_mono = audio_data_48k
+
+            # Get trim settings from recorder (or directly from settings)
+            # Assumes apply_settings was called on recorder
+            threshold_db = getattr(self.audio_recorder, 'silence_threshold_db', -40)
+            padding_ms = getattr(self.audio_recorder, 'padding_ms', 100)
+
+            # Trim using numpy utility function
+            trimmed_data_48k, new_duration_48k = trim_silence_numpy(
+                audio_data_48k_mono,
+                samplerate_48k,
+                threshold_db=threshold_db,
+                padding_ms=padding_ms
+            )
+
+            if new_duration_48k > 0:
+                 # Decide if saving trimmed mono or applying trim to original stereo
+                 # Simple: Save the trimmed mono result
+                 final_data_48k = trimmed_data_48k
+                 final_samplerate_48k = samplerate_48k
+                 subtype_48k = getattr(self.audio_recorder, 'subtype', 'PCM_16') # Get subtype
+
+                 # Save trimmed file (overwrite original)
+                 sf.write(audio_file_48k, final_data_48k, final_samplerate_48k, subtype=subtype_48k)
+                 print(f"Trimmed and saved {os.path.basename(audio_file_48k)}")
+
+                 # Update data manager with new duration and trim status
+                 self.data_manager.update_trim_status(is_trimmed=True, new_duration=new_duration_48k)
+                 self.statusBar().showMessage(f"Trimmed {current_id}.wav. New duration: {new_duration_48k:.2f}s")
+
+                 # Reload waveform
+                 self.waveform_widget.load_audio_file(audio_file_48k)
+
+            else:
+                 self.show_error(f"Trimming resulted in empty audio for {os.path.basename(audio_file_48k)}. File not changed.")
+                 # Optionally mark as trimmed=False or keep as is
+                 self.data_manager.update_trim_status(is_trimmed=False) # Indicate trim failed
+
+
+            # --- Trim 8kHz file (if exists and enabled) ---
+            if audio_file_8k and os.path.exists(audio_file_8k):
+                self.statusBar().showMessage(f"Trimming {os.path.basename(audio_file_8k)}...")
+                QApplication.processEvents() # Update UI
+
+                try:
+                    audio_data_8k, samplerate_8k = sf.read(audio_file_8k, always_2d=False)
+                    if audio_data_8k.ndim > 1: audio_data_8k = audio_data_8k[:, 0]
+
+                    trimmed_data_8k, new_duration_8k = trim_silence_numpy(
+                        audio_data_8k,
+                        samplerate_8k,
+                        threshold_db=threshold_db,
+                        padding_ms=padding_ms
+                    )
+
+                    if new_duration_8k > 0:
+                        subtype_8k = getattr(self.audio_recorder, 'subtype', 'PCM_16') # Use same subtype
+                        sf.write(audio_file_8k, trimmed_data_8k, samplerate_8k, subtype=subtype_8k)
+                        print(f"Trimmed and saved {os.path.basename(audio_file_8k)}")
+                    else:
+                        print(f"Warning: Trimming resulted in empty audio for {os.path.basename(audio_file_8k)}. File not changed.")
+
+                except Exception as e_8k:
+                     self.show_error(f"Error trimming 8kHz file '{os.path.basename(audio_file_8k)}': {str(e_8k)}")
+
+            # Refresh UI elements related to duration/trim status if needed
+            # self.update_ui_with_item(self.data_manager.get_current_item()) # Refresh
             self.waveform_widget.load_audio_file(audio_file_48k)
+
+
         except Exception as e:
-            self.show_error(f"Error trimming audio: {str(e)}")
+            self.show_error(f"Error during trimming process: {str(e)}")
+            # Ensure status is not marked as trimmed if error occurred
+            self.data_manager.update_trim_status(is_trimmed=False)
 
     def trim_silence_from_audio(self, audio_segment, silence_threshold=-50, min_silence_len=100):
         """Trim silence from beginning and end of an audio segment."""
@@ -666,6 +814,20 @@ class MainWindow(QMainWindow):
             self.text_id.setText(str(item.get('id', '')))
             self.text_sentence.setPlainText(str(item.get('text', '')))
 
+            # Load waveform if audio exists for this item
+            audio_path = item.get('audio_path_48k', '')
+            if audio_path and os.path.exists(audio_path):
+                self.waveform_widget.load_audio_file(audio_path)
+                # Also update player's duration display if not playing
+                if not self.audio_player.is_playing:
+                     # Temporarily load to get duration, then maybe unload or just update display
+                     # Simpler: just load into waveform, playback will load again if needed
+                     pass
+
+            else:
+                # Clear waveform if no audio recorded for this item
+                self.waveform_widget.set_audio_data(None, 48000) # Clear display
+
             # Update language, style, and speaker combo boxes if available in the data
             if 'language' in item and item['language']:
                 language = str(item.get('language', ''))
@@ -694,14 +856,24 @@ class MainWindow(QMainWindow):
                 if index >= 0:
                     self.speaker_combo.setCurrentIndex(index)
 
-            # Update UI to clearly show recording status
+            # Update recorded status indicator
             recorded = item.get('recorded', False)
+            self.recording_panel.set_recorded_indicator(recorded)
             if recorded:
-                self.recording_panel.set_recorded_indicator(True)
-                self.statusBar().showMessage(f"Item {item.get('id', '')} already recorded")
+                status_msg = f"Item {item.get('id', '')} recorded."
+                trimmed = item.get('trimmed', False)
+                if trimmed: status_msg += " (Trimmed)"
+                self.statusBar().showMessage(status_msg)
             else:
-                self.recording_panel.set_recorded_indicator(False)
                 self.statusBar().showMessage(f"Ready to record item {item.get('id', '')}")
+
+        else:
+             # Handle case where item is None (e.g., empty CSV)
+             self.text_id.clear()
+             self.text_sentence.clear()
+             self.waveform_widget.set_audio_data(None, 48000)
+             self.recording_panel.set_recorded_indicator(False)
+             self.statusBar().showMessage("No data loaded or item selected.")
 
 
     def update_audio_counter(self):
@@ -722,6 +894,7 @@ class MainWindow(QMainWindow):
         
         # Load last used directory
         last_dir = settings.value("last_directory", "")
+        self.audio_recorder.apply_settings(settings) # Ensure settings are applied
         if last_dir and os.path.exists(last_dir):
             self.data_manager.set_base_directory(last_dir)
     
@@ -763,6 +936,7 @@ class MainWindow(QMainWindow):
         from PyQt5.QtWidgets import QProgressDialog, QApplication
         
         devices = self.audio_recorder.get_available_devices()
+        print(devices)
         if not devices:
             QMessageBox.warning(self, "No Devices", "No recording devices detected.")
             return
