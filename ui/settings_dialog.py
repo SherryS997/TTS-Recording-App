@@ -169,12 +169,9 @@ class SettingsDialog(QDialog):
                 "Changing the ASIO setting requires restarting the application for it to take effect."
             )
         super().accept()
-
+    
     def get_settings(self):
         """Return the current settings as a QSettings object for immediate use."""
-        # This function should ideally just reflect the dialog's current state
-        # without re-saving, but saving here is okay for simplicity if accept() calls it.
-        # Let's simplify: save_settings IS the source of truth for get_settings
-        self.save_settings() # Ensure QSettings is up-to-date
-        return QSettings("AudioRecorder", "RecordingApp")
-
+        # Ensure QSettings is up-to-date and use the same QSettings constructor
+        self.save_settings() 
+        return QSettings()  # Use default constructor to match what's used elsewhere

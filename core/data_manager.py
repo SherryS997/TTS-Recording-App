@@ -1,5 +1,4 @@
 import os
-import csv
 import pandas as pd
 import datetime
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QSettings

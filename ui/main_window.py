@@ -311,12 +311,11 @@ class MainWindow(QMainWindow):
             print("ASIO devices listed.")
         else:
             # Check if ASIO was expected
-            settings = QSettings("AudioRecorder", "RecordingApp")
+            settings = QSettings()  # Remove organization/app name
             asio_enabled = settings.value("audio/enable_asio", False, bool)
             if sys.platform == 'win32' and asio_enabled:
                 print("Warning: ASIO was enabled in settings, but no ASIO devices were found by sounddevice.")
                 QMessageBox.warning(self, "ASIO Warning", "ASIO is enabled in settings, but no ASIO devices were found.\nEnsure ASIO drivers are installed and working.")
-
     
     def initialize_recording(self):
         """Set up the recording session with current settings."""
@@ -890,7 +889,7 @@ class MainWindow(QMainWindow):
     
     def load_settings(self):
         """Load application settings."""
-        settings = QSettings("AudioRecorder", "RecordingApp")
+        settings = QSettings()  # Remove organization/app name
         
         # Load last used directory
         last_dir = settings.value("last_directory", "")
@@ -901,7 +900,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle window close event."""
         # Save settings before closing
-        settings = QSettings("AudioRecorder", "RecordingApp")
+        settings = QSettings()  # Remove organization/app name
         settings.setValue("last_directory", self.data_manager.base_dir)
         
         # Accept the close event
