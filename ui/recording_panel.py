@@ -19,7 +19,8 @@ class RecordingPanel(QWidget):
     next_button_clicked = pyqtSignal()
     prev_button_clicked = pyqtSignal()
     trim_button_clicked = pyqtSignal()
-    
+    upload_button_clicked = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         
@@ -134,7 +135,18 @@ class RecordingPanel(QWidget):
         self.trim_button.setToolTip("Trim Audio (T)")
         self.trim_button.clicked.connect(self.on_trim_clicked)
         layout.addWidget(self.trim_button)
-    
+
+        # Upload button
+        self.upload_button = QPushButton("Upload")
+        self.upload_button.setToolTip("Upload Audio to Server (U)")
+        self.upload_button.clicked.connect(self.on_upload_clicked)
+        layout.addWidget(self.upload_button)
+
+    @pyqtSlot()
+    def on_upload_clicked(self):
+        """Handle upload button click."""
+        self.upload_button_clicked.emit()
+
     def update_button_states(self):
         """Update button states based on current application state."""
         # Update record button
@@ -171,6 +183,8 @@ class RecordingPanel(QWidget):
         if has_focus:
             self.play_button.setFocus()
     
+
+
     @pyqtSlot()
     def on_record_clicked(self):
         """Handle record button click."""
@@ -303,5 +317,7 @@ class RecordingPanel(QWidget):
             self.on_next_clicked()
         elif event.key() == Qt.Key_T:
             self.on_trim_clicked()
+        elif event.key() == Qt.Key_U:
+            self.on_upload_clicked()
         else:
             super().keyPressEvent(event)

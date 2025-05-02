@@ -36,7 +36,8 @@ class DataManager(QObject):
             'audio_path_48k': '',
             'audio_path_8k': '',
             'duration': 0.0,
-            'trimmed': False
+            'trimmed': False,
+            'uploaded': False 
         }
         
         # Load settings

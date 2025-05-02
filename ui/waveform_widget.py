@@ -84,7 +84,7 @@ class WaveformWidget(QWidget):
         self.canvas.draw()
         
     @pyqtSlot(float)
-    def update_position(self, current_time):
+    def update_controls_from_player_time(self, current_time):
         total_duration = self.audio_player.get_duration() if self.audio_player else 0
         if total_duration > 0 and self.time_slider:
             # Update slider value based on current_time

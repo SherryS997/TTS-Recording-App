@@ -25,7 +25,7 @@ class SettingsDialog(QDialog):
         audio_layout.addRow("Bit Depth:", self.bit_depth_combo)
         
         self.buffer_size_combo = QComboBox()
-        self.buffer_size_combo.addItems(["256", "512", "1024", "2048", "4096"])
+        self.buffer_size_combo.addItems(["4", "8", "16", "32", "64", "128", "256", "512", "1024", "2048", "4096"])
         audio_layout.addRow("Buffer Size:", self.buffer_size_combo)
         
         self.trim_threshold_db_spin = QDoubleSpinBox()
@@ -70,6 +70,11 @@ class SettingsDialog(QDialog):
         self.file_format_combo.addItems(["WAV", "FLAC"])
         storage_layout.addRow("File Format:", self.file_format_combo)
         
+        # Add auto-upload checkbox
+        self.auto_upload_check = QCheckBox("Automatically upload recordings after saving")
+        self.auto_upload_check.setToolTip("When enabled, recordings will be automatically uploaded to the server after being saved")
+        storage_layout.addRow("", self.auto_upload_check)
+
         main_layout.addWidget(storage_group)
         
         # Buttons
@@ -117,9 +122,11 @@ class SettingsDialog(QDialog):
         # Storage settings
         storage_dir = settings.value("storage/directory", "data")
         file_format = settings.value("storage/file_format", "WAV")
+        auto_upload = settings.value("storage/auto_upload", False, bool)
         
         self.storage_dir_edit.setText(storage_dir)
-        
+        self.auto_upload_check.setChecked(auto_upload)
+
         format_index = self.file_format_combo.findText(file_format)
         if format_index >= 0:
             self.file_format_combo.setCurrentIndex(format_index)
@@ -147,7 +154,8 @@ class SettingsDialog(QDialog):
         # Storage settings
         settings.setValue("storage/directory", self.storage_dir_edit.text())
         settings.setValue("storage/file_format", self.file_format_combo.currentText())
-    
+        settings.setValue("storage/auto_upload", self.auto_upload_check.isChecked())
+            
     def browse_directory(self):
         """Open file dialog to select storage directory."""
         directory = QFileDialog.getExistingDirectory(

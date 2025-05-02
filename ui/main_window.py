@@ -1,6 +1,6 @@
 # ui/main_window.py
 import os
-import datetime, sys
+import datetime, sys, requests
 import pandas as pd
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QPushButton, QLabel, QComboBox, QFileDialog, 
@@ -187,7 +187,13 @@ class MainWindow(QMainWindow):
         select_output_dir_action = QAction("Set Output Directory", self)
         select_output_dir_action.triggered.connect(self.select_output_directory)
         file_menu.addAction(select_output_dir_action)
-        
+
+        # Add upload action to the menu
+        file_menu.addSeparator()
+        upload_action = QAction("Upload Current Recording", self)
+        upload_action.triggered.connect(self.upload_recording)
+        file_menu.addAction(upload_action)
+
         file_menu.addSeparator()
         
         exit_action = QAction("Exit", self)
@@ -240,6 +246,7 @@ class MainWindow(QMainWindow):
         self.recording_panel.next_button_clicked.connect(self.next_sentence)
         self.recording_panel.prev_button_clicked.connect(self.prev_sentence)
         self.recording_panel.trim_button_clicked.connect(self.trim_audio)
+        self.recording_panel.upload_button_clicked.connect(self.upload_recording)  # Add this line
         
         # Connect text input signals
         self.text_id.returnPressed.connect(self.load_by_id)
@@ -273,6 +280,99 @@ class MainWindow(QMainWindow):
         self.device_8k_combo.setEnabled(is_enabled)
         self.audio_recorder.enable_8k = is_enabled
         print(self.enable_8k_checkbox.isChecked())
+
+    def upload_recording(self):
+        """Upload the current recording to the API endpoint."""
+        # Get current item
+        current_item = self.data_manager.get_current_item()
+        if current_item is None:
+            self.show_error("No current item selected for upload.")
+            return False
+        
+        # Check if this item has been recorded
+        audio_path_48k = current_item.get('audio_path_48k', '')
+        audio_path_8k = current_item.get('audio_path_8k', '')
+        
+        if not audio_path_48k or not os.path.exists(audio_path_48k):
+            self.show_error("No 48kHz audio file found for upload.")
+            return False
+        
+        # Get metadata from the current item and UI controls
+        text_id = str(current_item.get('id', ''))
+        text = str(current_item.get('text', ''))
+        
+        # Get current date for easy_id
+        current_date = self.date_edit.date().toString("yyyyMMdd")
+        
+        # Get language, style, and speaker from combo boxes
+        language = self.language_combo.currentText()
+        style = self.style_combo.currentText()
+        speaker = self.speaker_combo.currentText()
+        
+        # Add category (you might want to add this as a UI field later)
+        category = "DEFAULT"
+        
+        # Prepare data for the API request
+        data = {
+            "easy_id": current_date,
+            "Sentence": text,
+            "speaker": speaker,
+            "language": language,
+            "style": style,
+            "category": category,
+            "data_id": text_id
+        }
+        
+        # Get filenames for upload
+        filename_48k = os.path.basename(audio_path_48k)
+        
+        # Prepare files for the API request
+        files = {
+            'audio_file_48khz': (filename_48k, open(audio_path_48k, 'rb'), 'audio/wav')
+        }
+        
+        # Add 8kHz file if available
+        if audio_path_8k and os.path.exists(audio_path_8k) and self.enable_8k_checkbox.isChecked():
+            filename_8k = os.path.basename(audio_path_8k)
+            files['audio_file_8khz'] = (filename_8k, open(audio_path_8k, 'rb'), 'audio/wav')
+        
+        try:
+            self.statusBar().showMessage(f"Uploading {text_id}...")
+            # Send POST request to the API
+            response = requests.post(
+                'http://tts-dc-prod.centralindia.cloudapp.azure.com:8094/audio_upload', 
+                files=files, 
+                data=data
+            )
+            
+            # Clean up file handles
+            for key in files:
+                files[key][1].close()
+            
+            # Check response
+            if response.ok:
+                self.statusBar().showMessage(f"Successfully uploaded audio {text_id}")
+                
+                # Update data manager to mark as uploaded
+                self.data_manager.update_current_item({'uploaded': True})
+                
+                # Update UI to show successful upload
+                QMessageBox.information(self, "Upload Successful", 
+                                    f"Audio {text_id} was successfully uploaded to the server.")
+                return True
+            else:
+                self.show_error(f"Upload failed: Status {response.status_code}, {response.text}")
+                return False
+                
+        except Exception as e:
+            self.show_error(f"Upload error: {str(e)}")
+            
+            # Clean up file handles in case of exception
+            for key in files:
+                if not files[key][1].closed:
+                    files[key][1].close()
+            
+            return False
 
     def update_device_list(self):
         """Update the device combo boxes with available audio devices."""
@@ -503,6 +603,16 @@ class MainWindow(QMainWindow):
         # Optionally auto-advance:
         # QTimer.singleShot(500, self.next_sentence)
 
+        # After successful recording, update data manager and UI
+        if final_audio_path_48k:
+            self.waveform_widget.load_audio_file(final_audio_path_48k)
+            
+            # Auto-upload if enabled in settings
+            settings = QSettings()
+            auto_upload = settings.value("storage/auto_upload", False, bool)
+            if auto_upload:
+                QTimer.singleShot(500, self.upload_recording)  # Short delay before upload
+
     def play_audio(self):
         """Play the audio file associated with the current item."""
         current_item = self.data_manager.get_current_item()
@@ -720,7 +830,7 @@ class MainWindow(QMainWindow):
                 return  # Skip updates if we don't have a valid duration
         
         # Update the waveform position
-        self.waveform_widget.update_position(position)
+        self.waveform_widget.update_controls_from_player_time(position)
         
         # Update the recording panel's time display
         minutes = int(position // 60)

@@ -26,10 +26,23 @@ class AudioRecorder(QObject):
     error_occurred = pyqtSignal(str)
 
     def __init__(self, parent=None):
-        self.format = 'int16' # Or load from settings
+        super().__init__(parent)
         self.silence_threshold_db = -40 # Default, or load from settings
         self.padding_ms = 100 # Default, or load from settings
         self.auto_trim_on_save = False
+        self.is_recording = False
+        self.recording_thread = None
+        self.frames_48k = []
+        self.frames_8k = []
+        self.device_48k = None
+        self.device_8k = None
+        self.format = 'int16'
+        self.channels = 1
+        self.rate_48k = 48000
+        self.rate_8k = 8000
+        self.chunk_size = 16
+        self.last_recording_duration = 0.0
+        self.enable_8k = False
 
     def apply_settings(self, settings):
         """Apply settings from the settings dialog."""
@@ -73,22 +86,6 @@ class AudioRecorder(QObject):
             self.error_occurred.emit(f"Failed to apply settings: {str(e)}")
 
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.is_recording = False
-        self.recording_thread = None
-        self.frames_48k = []
-        self.frames_8k = []
-        self.device_48k = None
-        self.device_8k = None
-        self.format = 'int16'
-        self.channels = 1
-        self.rate_48k = 48000
-        self.rate_8k = 8000
-        self.chunk_size = 1024
-        self.last_recording_duration = 0.0
-        self.enable_8k = False
-    
     def get_available_devices(self, include_asio=True):
         """Returns a list of available audio devices with fallbacks."""
         devices = []
@@ -292,7 +289,7 @@ class AudioRecorder(QObject):
                  return 0.0
             
         # Apply trimming if enabled
-        if False:
+        if self.auto_trim_on_save:
              # Ensure audio_data is mono for trimming function
              if audio_data.ndim > 1:
                  audio_data_mono = audio_data[:, 0] # Use first channel
@@ -338,29 +335,6 @@ class AudioRecorder(QObject):
         except Exception as e:
             self.error_occurred.emit(f"Failed to save audio file '{filepath}': {str(e)}")
             return 0.0
-
-    def _trim_silence(self, audio_data, samplerate, threshold=0.02, padding_ms=100):
-        """Trim silence from the beginning and end of the audio."""
-        # Convert to absolute values
-        amplitude = np.abs(audio_data)
-        
-        # Find where audio exceeds threshold
-        non_silent = amplitude > threshold
-        
-        # Find the first and last non-silent points
-        if np.any(non_silent):
-            start = np.where(non_silent)[0][0]
-            end = np.where(non_silent)[0][-1]
-            
-            # Add padding
-            padding_samples = int(padding_ms * samplerate / 1000)
-            start = max(0, start - padding_samples)
-            end = min(len(audio_data), end + padding_samples)
-            
-            return audio_data[start:end]
-        else:
-            # Return original if no non-silent parts found
-            return audio_data
         
     def get_system_default_device(self, mode="input"):
         """Get the system default audio device in a cross-platform way

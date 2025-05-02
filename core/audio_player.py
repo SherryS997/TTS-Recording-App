@@ -270,74 +270,7 @@ class AudioPlayer(QObject):
     def get_duration(self):
         """Get audio duration in seconds."""
         return self.duration
-    
-    def _playback_worker(self):
-        """Worker method for audio playback thread."""
-        try:
-            # Calculate start position in samples
-            start_sample = int(self.current_position * self.sample_rate)
-            
-            # Create an output stream
-            stream = sd.OutputStream(
-                samplerate=self.sample_rate,
-                channels=self.channels,
-                dtype='int16'
-            )
-            
-            with stream:
-                # Buffer size for each chunk (100ms)
-                buffer_size = int(self.sample_rate * 0.1)
-                
-                # Play audio in chunks
-                current_sample = start_sample
-                
-                while self.is_playing and current_sample < len(self.audio_data):
-                    # Check for seek request
-                    if self.seek_position is not None:
-                        current_sample = int(self.seek_position * self.sample_rate)
-                        self.seek_position = None
-                    
-                    # Check if paused
-                    if self.is_paused:
-                        time.sleep(0.1)
-                        continue
-                    
-                    # Calculate end of chunk
-                    end_sample = min(current_sample + buffer_size, len(self.audio_data))
-                    
-                    # Get audio chunk
-                    if self.channels == 1:
-                        chunk = self.audio_data[current_sample:end_sample]
-                    else:
-                        chunk = self.audio_data[current_sample:end_sample, :]
-                    
-                    # Write to output stream
-                    try:
-                        stream.write(chunk)
-                    except Exception as stream_write_e: # Catch stream write errors
-                        self.error_occurred.emit(f"Stream write error: {stream_write_e}")
-                        self.is_playing = False # Ensure loop exit
-                        break # Exit the loop on stream write error
-                    
-                    # Update position
-                    current_sample = end_sample
-                    self.current_position = current_sample / self.sample_rate
-
-                    if not self.is_playing: # Double check inside the loop
-                        break
-                    
-                # Playback finished
-                if current_sample >= len(self.audio_data) and self.is_playing:
-                    self.is_playing = False
-                    self.current_position = 0.0
-                    self.position_timer.stop()
-                    self.playback_stopped.emit()
-                    
-        except Exception as e:
-            self.is_playing = False
-            self.error_occurred.emit(f"Playback error: {str(e)}")
-            self.playback_stopped.emit()
-    
+        
     def _update_position(self):
         """Update position timer callback."""
         if self.is_playing and not self.is_paused:
