@@ -22,10 +22,12 @@ class SettingsDialog(QDialog):
         
         self.bit_depth_combo = QComboBox()
         self.bit_depth_combo.addItems(["16-bit", "24-bit", "32-bit float"])
+        self.bit_depth_combo.setToolTip("Audio resolution. 16-bit is standard CD quality.\n24-bit or 32-bit float offer higher dynamic range.") # ADDED
         audio_layout.addRow("Bit Depth:", self.bit_depth_combo)
         
         self.buffer_size_combo = QComboBox()
         self.buffer_size_combo.addItems(["4", "8", "16", "32", "64", "128", "256", "512", "1024", "2048", "4096"])
+        self.buffer_size_combo.setToolTip("Audio buffer size in samples. Smaller values reduce latency\nbut increase CPU usage and risk of glitches. Larger values are safer.\nRequires restart if changed significantly with some drivers.") # ADDED
         audio_layout.addRow("Buffer Size:", self.buffer_size_combo)
         
         self.trim_threshold_db_spin = QDoubleSpinBox()
@@ -33,22 +35,26 @@ class SettingsDialog(QDialog):
         self.trim_threshold_db_spin.setSuffix(" dB")
         self.trim_threshold_db_spin.setDecimals(1)
         self.trim_threshold_db_spin.setSingleStep(1.0)
+        self.trim_threshold_db_spin.setToolTip("Signal level below which audio is considered silence for trimming.\nLower values (e.g., -60 dB) are stricter.") # ADDED
         audio_layout.addRow("Trim Threshold (dB):", self.trim_threshold_db_spin) # Update label
 
         self.padding_ms_spin = QSpinBox() # Add padding setting if not already there
         self.padding_ms_spin.setRange(0, 1000)
         self.padding_ms_spin.setSuffix(" ms")
         self.padding_ms_spin.setSingleStep(50)
+        self.padding_ms_spin.setToolTip("Amount of audio (in milliseconds) to keep before and after\nthe detected non-silent parts during trimming.") # ADDED
         audio_layout.addRow("Trim Padding:", self.padding_ms_spin)
 
-        self.auto_trim_check = QCheckBox("Auto-trim recordings")
+        self.auto_trim_check = QCheckBox("Auto-trim recordings on save") # Updated text slightly
+        self.auto_trim_check.setToolTip("Automatically remove leading/trailing silence\nwhen a recording is stopped and saved.") # ADDED
         audio_layout.addRow("", self.auto_trim_check)
 
         self.enable_asio_check = QCheckBox("Enable ASIO (Requires Restart)")
         self.enable_asio_check.setToolTip(
-            "Check this to enable ASIO audio devices on Windows.\n"
-            "The application must be restarted for this change to take effect."
-        )
+            "Check this to enable ASIO audio devices on Windows (if available).\n"
+            "ASIO drivers often provide lower latency.\n"
+            "Requires restarting the application."
+        ) # Existing tooltip is good
         audio_layout.addRow("", self.enable_asio_check)
         
         main_layout.addWidget(audio_group)
@@ -68,6 +74,7 @@ class SettingsDialog(QDialog):
         
         self.file_format_combo = QComboBox()
         self.file_format_combo.addItems(["WAV", "FLAC"])
+        self.file_format_combo.setToolTip("Audio file format for saving recordings.\nWAV is uncompressed. FLAC is lossless compressed (smaller files).") # ADDED
         storage_layout.addRow("File Format:", self.file_format_combo)
         
         # Add auto-upload checkbox

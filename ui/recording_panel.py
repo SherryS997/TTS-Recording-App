@@ -138,9 +138,31 @@ class RecordingPanel(QWidget):
 
         # Upload button
         self.upload_button = QPushButton("Upload")
+        self.upload_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp)) # Add an icon
         self.upload_button.setToolTip("Upload Audio to Server (U)")
         self.upload_button.clicked.connect(self.on_upload_clicked)
         layout.addWidget(self.upload_button)
+        self._is_uploaded = False # Internal flag
+
+    @pyqtSlot(bool)
+    def set_upload_status(self, is_uploaded):
+        """Update the appearance of the upload button."""
+        self._is_uploaded = is_uploaded
+        if is_uploaded:
+            self.upload_button.setText("Uploaded")
+            self.upload_button.setIcon(self.style().standardIcon(QStyle.SP_DialogApplyButton)) # Checkmark icon
+            self.upload_button.setToolTip("Recording already uploaded")
+            self.upload_button.setEnabled(False) # Disable if already uploaded
+            # Optional: Change style
+            # self.upload_button.setStyleSheet("background-color: lightgreen;")
+        else:
+            self.upload_button.setText("Upload")
+            self.upload_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
+            self.upload_button.setToolTip("Upload Audio to Server (U)")
+            self.upload_button.setEnabled(True) # Enable if not uploaded
+            # Reset style if changed
+            # self.upload_button.setStyleSheet("")
+        self.upload_button.update()
 
     @pyqtSlot()
     def on_upload_clicked(self):
@@ -290,6 +312,7 @@ class RecordingPanel(QWidget):
         self.prev_button.setEnabled(enabled)
         self.next_button.setEnabled(enabled)
         self.trim_button.setEnabled(enabled)
+        self.upload_button.setEnabled(enabled and not self._is_uploaded)
 
     @pyqtSlot(bool)
     def set_recorded_indicator(self, is_recorded):

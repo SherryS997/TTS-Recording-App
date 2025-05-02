@@ -183,10 +183,12 @@ class MainWindow(QMainWindow):
         load_csv_action = QAction("Load CSV", self)
         load_csv_action.triggered.connect(self.load_csv)
         file_menu.addAction(load_csv_action)
+        file_menu.addSeparator()
         
         select_output_dir_action = QAction("Set Output Directory", self)
         select_output_dir_action.triggered.connect(self.select_output_directory)
         file_menu.addAction(select_output_dir_action)
+        file_menu.addSeparator()
 
         # Add upload action to the menu
         file_menu.addSeparator()
@@ -199,7 +201,26 @@ class MainWindow(QMainWindow):
         exit_action = QAction("Exit", self)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        
+
+        # --- Navigation Menu --- ADDED ---
+        nav_menu = menubar.addMenu("Navigation")
+
+        next_action = QAction("Next Item (→)", self)
+        next_action.triggered.connect(self.next_sentence)
+        nav_menu.addAction(next_action)
+
+        prev_action = QAction("Previous Item (←)", self)
+        prev_action.triggered.connect(self.prev_sentence)
+        nav_menu.addAction(prev_action)
+
+        nav_menu.addSeparator()
+
+        goto_next_unrecorded_action = QAction("Go to Next Unrecorded", self)
+        goto_next_unrecorded_action.setToolTip("Find the next item in the list that hasn't been recorded yet.")
+        goto_next_unrecorded_action.triggered.connect(self.go_to_next_unrecorded)
+        nav_menu.addAction(goto_next_unrecorded_action)
+        # --- End Navigation Menu ---
+
         # Settings menu
         settings_menu = menubar.addMenu("Settings")
         
@@ -210,7 +231,43 @@ class MainWindow(QMainWindow):
         test_devices_action = QAction("Test Recording Devices", self)
         test_devices_action.triggered.connect(self.test_recording_devices)
         settings_menu.addAction(test_devices_action)
-    
+
+    def go_to_next_unrecorded(self):
+        """Finds and jumps to the next item where 'recorded' is False."""
+        if self.data_manager.dataframe is None or self.data_manager.dataframe.empty:
+            self.statusBar().showMessage("No data loaded to navigate.")
+            return
+
+        df = self.data_manager.dataframe
+        current_idx = self.data_manager.current_index
+        total_items = len(df)
+
+        # Start searching from the item *after* the current one
+        search_indices = list(range(current_idx + 1, total_items)) + list(range(0, current_idx + 1))
+
+        found_idx = -1
+        for idx in search_indices:
+            try:
+                # Check the 'recorded' status for the row at index 'idx'
+                if not df.iloc[idx]['recorded']:
+                    found_idx = idx
+                    break # Stop at the first unrecorded item found
+            except IndexError:
+                 continue # Should not happen with correct range, but safety first
+            except KeyError:
+                 self.show_error("Error: 'recorded' column not found in DataFrame.")
+                 return
+
+        if found_idx != -1:
+            # Jump to the found item using its index
+            # Directly set index and emit signal for update
+            self.data_manager.current_index = found_idx
+            self.data_manager.current_item_changed.emit(df.iloc[found_idx])
+            self.statusBar().showMessage(f"Jumped to next unrecorded item: {df.iloc[found_idx]['id']}")
+        else:
+            QMessageBox.information(self, "Navigation", "No unrecorded items found.")
+            self.statusBar().showMessage("All items seem to be recorded.")
+
     def connect_signals(self):
         # Connect UI signals
         self.update_device_list_btn.clicked.connect(self.update_device_list)
@@ -225,7 +282,10 @@ class MainWindow(QMainWindow):
         # Connect player signals
         self.audio_player.playback_started.connect(self.on_playback_started)
         self.audio_player.playback_stopped.connect(self.on_playback_stopped)
+        # Connect position changed to BOTH the main window handler (for slider/labels)
+        # AND the waveform widget handler (for the red line)
         self.audio_player.position_changed.connect(self.on_player_position_changed)
+        self.audio_player.position_changed.connect(self.waveform_widget.update_waveform_position_line) # ADD THIS LINE
         self.audio_player.error_occurred.connect(self.show_error)
         
         # Set up the waveform widget to use the recording panel's time slider
@@ -337,6 +397,7 @@ class MainWindow(QMainWindow):
             files['audio_file_8khz'] = (filename_8k, open(audio_path_8k, 'rb'), 'audio/wav')
         
         try:
+            self._set_ui_busy(True, f"Uploading {text_id}...") # Add busy indicator
             self.statusBar().showMessage(f"Uploading {text_id}...")
             # Send POST request to the API
             response = requests.post(
@@ -352,20 +413,21 @@ class MainWindow(QMainWindow):
             # Check response
             if response.ok:
                 self.statusBar().showMessage(f"Successfully uploaded audio {text_id}")
-                
-                # Update data manager to mark as uploaded
                 self.data_manager.update_current_item({'uploaded': True})
-                
-                # Update UI to show successful upload
-                QMessageBox.information(self, "Upload Successful", 
-                                    f"Audio {text_id} was successfully uploaded to the server.")
+                self.recording_panel.set_upload_status(True) # Update button state immediately
+                QMessageBox.information(self, "Upload Successful", f"Audio {text_id} uploaded.")
+                # Optional: Auto-advance if configured
+                # if self.settings.value(...): self.next_sentence()
+                self._set_ui_busy(False) # End busy state
                 return True
             else:
+                self._set_ui_busy(False, f"Upload failed for {text_id}") # End busy state
                 self.show_error(f"Upload failed: Status {response.status_code}, {response.text}")
                 return False
                 
         except Exception as e:
             self.show_error(f"Upload error: {str(e)}")
+            self._set_ui_busy(False, f"Upload error for {text_id}") # End busy state
             
             # Clean up file handles in case of exception
             for key in files:
@@ -592,6 +654,8 @@ class MainWindow(QMainWindow):
             final_audio_path_8k,
             duration
         )
+        self.recording_panel.set_recorded_indicator(True) # Update record button appearance
+        self.recording_panel.set_upload_status(False) # Newly recorded item is not uploaded yet
 
         # Update progress display
         stats = self.data_manager.get_total_stats()
@@ -663,6 +727,20 @@ class MainWindow(QMainWindow):
         """Move to the previous item in the dataset."""
         self.data_manager.previous_item()
     
+    def _set_ui_busy(self, busy, message=""):
+        """Helper to enable/disable controls and set status."""
+        self.recording_panel.enable_controls(not busy)
+        # Optionally disable/enable other controls like menu items if needed
+        # self.file_menu.setEnabled(not busy)
+        # self.settings_menu.setEnabled(not busy)
+        if message:
+            self.statusBar().showMessage(message)
+        if busy:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+        else:
+            QApplication.restoreOverrideCursor()
+        QApplication.processEvents() # Force UI update
+
     def trim_audio(self):
         """Trim silence from the current audio file using numpy and soundfile."""
         current_item = self.data_manager.get_current_item()
@@ -670,67 +748,67 @@ class MainWindow(QMainWindow):
             self.show_error("No current item selected.")
             return
 
-        # Get full paths from data manager
         audio_file_48k = current_item.get('audio_path_48k', '')
-        audio_file_8k = current_item.get('audio_path_8k', '')
-        current_id = current_item.get('id', '') # For messages
+        audio_file_8k = current_item.get('audio_path_8k', '') # Keep handling 8k too
+        current_id = current_item.get('id', '')
 
         if not audio_file_48k or not os.path.exists(audio_file_48k):
             self.show_error(f"Primary audio file not found or not recorded: {audio_file_48k}")
             return
+
+        # --- Start Busy State ---
+        self._set_ui_busy(True, f"Trimming {os.path.basename(audio_file_48k)}...")
+        # ---
+
         try:
             # --- Trim 48kHz file ---
-            self.statusBar().showMessage(f"Trimming {os.path.basename(audio_file_48k)}...")
-            QApplication.processEvents() # Update UI
+            audio_data_48k, samplerate_48k = sf.read(audio_file_48k, always_2d=True) # Read as 2D first
 
-            # Load using soundfile
-            audio_data_48k, samplerate_48k = sf.read(audio_file_48k, always_2d=False)
+            # Determine original number of channels before potentially making mono
+            original_channels = audio_data_48k.shape[1] if audio_data_48k.ndim > 1 else 1
 
-            # Ensure mono for trimming
-            if audio_data_48k.ndim > 1:
+            # Create mono version for analysis
+            if original_channels > 1:
                 audio_data_48k_mono = audio_data_48k[:, 0]
             else:
-                audio_data_48k_mono = audio_data_48k
+                audio_data_48k_mono = audio_data_48k.flatten() # Ensure 1D if already mono
 
-            # Get trim settings from recorder (or directly from settings)
-            # Assumes apply_settings was called on recorder
             threshold_db = getattr(self.audio_recorder, 'silence_threshold_db', -40)
             padding_ms = getattr(self.audio_recorder, 'padding_ms', 100)
 
-            # Trim using numpy utility function
-            trimmed_data_48k, new_duration_48k = trim_silence_numpy(
+            # Modify trim_silence_numpy to return indices (or adjust here)
+            # Let's assume trim_silence_numpy can be modified or we re-implement the index finding part here
+            # For simplicity, let's stick to the current trim_silence_numpy which returns trimmed mono data
+
+            trimmed_data_48k_mono, new_duration_48k = trim_silence_numpy(
                 audio_data_48k_mono,
                 samplerate_48k,
                 threshold_db=threshold_db,
                 padding_ms=padding_ms
             )
 
+            trimmed_successfully = False
             if new_duration_48k > 0:
-                 # Decide if saving trimmed mono or applying trim to original stereo
-                 # Simple: Save the trimmed mono result
-                 final_data_48k = trimmed_data_48k
-                 final_samplerate_48k = samplerate_48k
-                 subtype_48k = getattr(self.audio_recorder, 'subtype', 'PCM_16') # Get subtype
+                # Simple approach: Save the trimmed mono result
+                # TODO: Implement stereo trimming preservation if needed
+                final_data_48k = trimmed_data_48k_mono
+                final_samplerate_48k = samplerate_48k
+                subtype_48k = getattr(self.audio_recorder, 'subtype', 'PCM_16')
 
-                 # Save trimmed file (overwrite original)
-                 sf.write(audio_file_48k, final_data_48k, final_samplerate_48k, subtype=subtype_48k)
-                 print(f"Trimmed and saved {os.path.basename(audio_file_48k)}")
+                sf.write(audio_file_48k, final_data_48k, final_samplerate_48k, subtype=subtype_48k)
+                print(f"Trimmed and saved (mono): {os.path.basename(audio_file_48k)}")
 
-                 # Update data manager with new duration and trim status
-                 self.data_manager.update_trim_status(is_trimmed=True, new_duration=new_duration_48k)
-                 self.statusBar().showMessage(f"Trimmed {current_id}.wav. New duration: {new_duration_48k:.2f}s")
-
-                 # Reload waveform
-                 self.waveform_widget.load_audio_file(audio_file_48k)
-
+                self.data_manager.update_trim_status(is_trimmed=True, new_duration=new_duration_48k)
+                status_message = f"Trimmed {current_id}. New duration: {new_duration_48k:.2f}s"
+                trimmed_successfully = True
             else:
-                 self.show_error(f"Trimming resulted in empty audio for {os.path.basename(audio_file_48k)}. File not changed.")
-                 # Optionally mark as trimmed=False or keep as is
-                 self.data_manager.update_trim_status(is_trimmed=False) # Indicate trim failed
+                status_message = f"Trimming resulted in empty audio for {os.path.basename(audio_file_48k)}. File not changed."
+                self.data_manager.update_trim_status(is_trimmed=False)
 
-
-            # --- Trim 8kHz file (if exists and enabled) ---
+            # --- Trim 8kHz file (if exists) ---
+            # (Keep the existing 8kHz trimming logic here, potentially adding status updates)
             if audio_file_8k and os.path.exists(audio_file_8k):
+                self._set_ui_busy(True, f"Trimming {os.path.basename(audio_file_8k)}...")
                 self.statusBar().showMessage(f"Trimming {os.path.basename(audio_file_8k)}...")
                 QApplication.processEvents() # Update UI
 
@@ -762,8 +840,17 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self.show_error(f"Error during trimming process: {str(e)}")
-            # Ensure status is not marked as trimmed if error occurred
+            status_message = f"Trimming failed for {current_id}."
             self.data_manager.update_trim_status(is_trimmed=False)
+            trimmed_successfully = False # Ensure flag is false on error
+
+        finally:
+            # --- End Busy State ---
+            self._set_ui_busy(False, status_message)
+            # ---
+            # Reload waveform only if trimming was successful
+            if trimmed_successfully:
+                self.waveform_widget.load_audio_file(audio_file_48k)
 
     def trim_silence_from_audio(self, audio_segment, silence_threshold=-50, min_silence_len=100):
         """Trim silence from beginning and end of an audio segment."""
@@ -822,31 +909,33 @@ class MainWindow(QMainWindow):
         self.duration_label.setText(f"Total Duration: {mins}:{secs:02d}")
 
     def on_player_position_changed(self, position, duration=None):
-        """Handle player position changed signal to update UI components."""
+        """Handle player position changed signal to update UI components (Slider, Labels)."""
         # Get duration from audio player if not provided in the signal
         if duration is None:
             duration = self.audio_player.get_duration()
             if duration <= 0:
                 return  # Skip updates if we don't have a valid duration
-        
-        # Update the waveform position
-        self.waveform_widget.update_controls_from_player_time(position)
-        
-        # Update the recording panel's time display
+
+        # --- Update the recording panel's time display ---
         minutes = int(position // 60)
         seconds = int(position % 60)
         current_time = f"{minutes}:{seconds:02d}"
-        
+
         total_minutes = int(duration // 60)
         total_seconds = int(duration % 60)
         total_time = f"{total_minutes}:{total_seconds:02d}"
-        
+
+        # Call recording panel's method to update labels
         self.recording_panel.update_time_display(current_time, total_time)
-        
-        # Update the slider position (as percentage of total duration)
-        if duration > 0:
-            position_percent = int((position / duration) * 1000)
-            self.recording_panel.update_slider_position(position_percent)
+
+        # --- Update the slider position ---
+        # Prevent feedback loop if user is dragging slider
+        if not self.recording_panel.time_slider.isSliderDown():
+             if duration > 0:
+                 # Calculate slider value (assuming range 0-1000)
+                 slider_value = int((position / duration) * 1000)
+                 # Call recording panel's method to update slider position
+                 self.recording_panel.update_slider_position(slider_value)
     
     def on_playback_started(self, filename, duration):
         """Handle playback started signal."""
@@ -968,21 +1057,30 @@ class MainWindow(QMainWindow):
             # Update recorded status indicator
             recorded = item.get('recorded', False)
             self.recording_panel.set_recorded_indicator(recorded)
-            if recorded:
-                status_msg = f"Item {item.get('id', '')} recorded."
-                trimmed = item.get('trimmed', False)
-                if trimmed: status_msg += " (Trimmed)"
-                self.statusBar().showMessage(status_msg)
-            else:
-                self.statusBar().showMessage(f"Ready to record item {item.get('id', '')}")
+
+            # --- Update Upload Status Indicator ---
+            uploaded = item.get('uploaded', False)
+            self.recording_panel.set_upload_status(uploaded)
+            # ---
+
+            # Update status bar message
+            status_msg = f"Item {item.get('id', '')}"
+            if recorded: status_msg += " recorded."
+            if item.get('trimmed', False): status_msg += " (Trimmed)"
+            if uploaded: status_msg += " (Uploaded)"
+            if not recorded: status_msg = f"Ready to record item {item.get('id', '')}"
+            self.statusBar().showMessage(status_msg)
 
         else:
-             # Handle case where item is None (e.g., empty CSV)
-             self.text_id.clear()
-             self.text_sentence.clear()
-             self.waveform_widget.set_audio_data(None, 48000)
-             self.recording_panel.set_recorded_indicator(False)
-             self.statusBar().showMessage("No data loaded or item selected.")
+            # Handle case where item is None (e.g., empty CSV)
+            self.text_id.clear()
+            self.text_sentence.clear()
+            self.waveform_widget.set_audio_data(None, 48000)
+            self.recording_panel.set_recorded_indicator(False)
+            self.statusBar().showMessage("No data loaded or item selected.")
+            self.recording_panel.set_recorded_indicator(False)
+            self.recording_panel.set_upload_status(False) # Reset upload status
+            self.statusBar().showMessage("No data loaded or item selected.")
 
 
     def update_audio_counter(self):
