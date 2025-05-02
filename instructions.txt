@@ -1,0 +1,68 @@
+# Instructions to Run the Python Qt Recording App
+
+## Prerequisites
+- Python (3.6 or newer recommended)
+- PyQt5 or PySide2 (Qt for Python)
+- Required Python packages (pip installable)
+
+## Setup Steps
+
+### Install Required Packages
+1. Install PyQt5 or PySide2:
+    ```
+    pip install PyQt5
+    ```
+    or
+    ```
+    pip install PySide2
+    ```
+
+2. Install other required packages:
+    ```
+    pip install -r requirements.txt
+    ```
+    (If a requirements.txt file exists in the project)
+
+### Running the Application
+1. Navigate to the project directory:
+    ```
+    cd /path/to/recording_app
+    ```
+
+2. Run the main Python script:
+    ```
+    python main.py
+    ```
+    (Replace main.py with the actual entry point file of the application)
+
+## Creating an Executable (Optional)
+
+### Using PyInstaller
+1. Install PyInstaller:
+    ```
+    pip install pyinstaller
+    ```
+
+2. Create a standalone executable:
+    ```
+    pyinstaller --onefile --windowed main.py
+    ```
+    (The executable will be created in the 'dist' directory)
+
+### Using cx_Freeze
+1. Install cx_Freeze:
+    ```
+    pip install cx_freeze
+    ```
+
+2. Create a setup.py file if not present
+3. Build the executable:
+    ```
+    python setup.py build
+    ```
+
+## Troubleshooting
+- Ensure all dependencies are installed
+- Check Python version compatibility
+- Verify PyQt5/PySide2 installation is correct
+- Look for error messages in the console output
